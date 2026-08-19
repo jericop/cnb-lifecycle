@@ -62,6 +62,7 @@ type LifecycleInputs struct {
 	SkipLayers            bool
 	UseDaemon             bool
 	UseLayout             bool
+	SkipChown             bool
 	AdditionalTags        str.Slice // str.Slice satisfies the `Value` interface required by the `flag` package
 	KanikoCacheTTL        time.Duration
 	InsecureRegistries    str.Slice

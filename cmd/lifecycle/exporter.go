@@ -78,6 +78,7 @@ func (e *exportCmd) DefineFlags() {
 	cli.FlagReportPath(&e.ReportPath)
 	cli.FlagRunImage(&e.RunImageRef) // FIXME: this flag isn't valid on Platform 0.7 and later
 	cli.FlagUID(&e.UID)
+	cli.FlagSkipChown(&e.SkipChown)
 	cli.FlagUseDaemon(&e.UseDaemon)
 
 	// deprecated
@@ -124,8 +125,10 @@ func (e *exportCmd) Privileges() error {
 			return cmd.FailErr(err, "initialize docker client")
 		}
 	}
-	if err = priv.EnsureOwner(e.UID, e.GID, e.CacheDir, e.LaunchCacheDir); err != nil {
+	if !e.SkipChown {
+		if err = priv.EnsureOwner(e.UID, e.GID, e.CacheDir, e.LaunchCacheDir); err != nil {
 		return cmd.FailErr(err, "chown volumes")
+	}
 	}
 	if err = priv.RunAs(e.UID, e.GID); err != nil {
 		return cmd.FailErr(err, fmt.Sprintf("exec as user %d:%d", e.UID, e.GID))

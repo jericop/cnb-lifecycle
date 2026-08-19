@@ -62,6 +62,7 @@ func (r *restoreCmd) DefineFlags() {
 	cli.FlagNoColor(&r.NoColor)
 	cli.FlagSkipLayers(&r.SkipLayers)
 	cli.FlagUID(&r.UID)
+	cli.FlagSkipChown(&r.SkipChown)
 }
 
 // Args validates arguments and flags, and fills in default values.
@@ -88,8 +89,10 @@ func (r *restoreCmd) Privileges() error {
 			return cmd.FailErr(err, "initialize docker client")
 		}
 	}
-	if err = priv.EnsureOwner(r.UID, r.GID, r.LayersDir, r.CacheDir, r.KanikoDir); err != nil {
+	if !r.SkipChown {
+		if err = priv.EnsureOwner(r.UID, r.GID, r.LayersDir, r.CacheDir, r.KanikoDir); err != nil {
 		return cmd.FailErr(err, "chown volumes")
+	}
 	}
 	if err = priv.RunAs(r.UID, r.GID); err != nil {
 		return cmd.FailErr(err, fmt.Sprintf("exec as user %d:%d", r.UID, r.GID))

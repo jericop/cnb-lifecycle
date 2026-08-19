@@ -142,6 +142,10 @@ func FlagSkipLayers(skipLayers *bool) {
 	flagSet.BoolVar(skipLayers, "skip-layers", *skipLayers, "do not provide layer metadata to buildpacks")
 }
 
+func FlagSkipChown(skipChown *bool) {
+	flagSet.BoolVar(skipChown, "skip-chown", *skipChown, "skip chown of volumes (for unprivileged environments like buildkit)")
+}
+
 func FlagSkipRestore(skipRestore *bool) {
 	flagSet.BoolVar(skipRestore, "skip-restore", *skipRestore, "do not restore layers or layer metadata")
 }
