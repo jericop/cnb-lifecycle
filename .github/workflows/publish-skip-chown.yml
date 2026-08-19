@@ -1,0 +1,48 @@
+name: publish-skip-chown
+
+on:
+  push:
+    branches:
+      - skip-chown
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Setup go
+        uses: actions/setup-go@v5
+        with:
+          check-latest: true
+          go-version-file: 'go.mod'
+      - name: Build
+        run: |
+          make clean
+          make build
+          make package
+      - uses: azure/docker-login@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Publish images
+        run: |
+          LIFECYCLE_IMAGE_TAG=skip-chown-poc
+
+          LINUX_AMD64_SHA=$(go run ./tools/image/main.go -lifecyclePath ./out/lifecycle-v*+linux.x86-64.tgz -tag jericop/lifecycle:${LIFECYCLE_IMAGE_TAG}-linux-x86-64 | awk '{print $NF}')
+          echo "LINUX_AMD64_SHA: $LINUX_AMD64_SHA"
+
+          LINUX_ARM64_SHA=$(go run ./tools/image/main.go -lifecyclePath ./out/lifecycle-v*+linux.arm64.tgz -tag jericop/lifecycle:${LIFECYCLE_IMAGE_TAG}-linux-arm64 -arch arm64 | awk '{print $NF}')
+          echo "LINUX_ARM64_SHA: $LINUX_ARM64_SHA"
+
+          docker manifest create jericop/lifecycle:${LIFECYCLE_IMAGE_TAG} \
+              jericop/lifecycle:${LIFECYCLE_IMAGE_TAG}-linux-x86-64@${LINUX_AMD64_SHA} \
+              jericop/lifecycle:${LIFECYCLE_IMAGE_TAG}-linux-arm64@${LINUX_ARM64_SHA}
+
+          MANIFEST_SHA=$(docker manifest push jericop/lifecycle:${LIFECYCLE_IMAGE_TAG})
+          echo "MANIFEST_SHA: $MANIFEST_SHA"
+          echo "Published: jericop/lifecycle:${LIFECYCLE_IMAGE_TAG}"
