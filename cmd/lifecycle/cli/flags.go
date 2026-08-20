@@ -190,3 +190,7 @@ func FlagInsecureRegistries(insecureRegistries *str.Slice) {
 func DeprecatedFlagRunImage(deprecatedRunImage *string) {
 	flagSet.StringVar(deprecatedRunImage, "image", "", "[deprecated] reference to run image")
 }
+
+func FlagPullRunImage(pullRunImage *bool) {
+	flagSet.BoolVar(pullRunImage, "pull-run-image", *pullRunImage, "pull run image from registry into layout directory (for layout mode in buildkit)")
+}

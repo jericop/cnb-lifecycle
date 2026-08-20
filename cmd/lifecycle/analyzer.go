@@ -50,6 +50,7 @@ func (a *analyzeCmd) DefineFlags() {
 		cli.FlagTags(&a.AdditionalTags)
 		cli.FlagUID(&a.UID)
 	cli.FlagSkipChown(&a.SkipChown)
+	cli.FlagPullRunImage(&a.PullRunImage)
 		cli.FlagUseDaemon(&a.UseDaemon)
 	}
 	// deprecated
@@ -110,6 +111,15 @@ func (a *analyzeCmd) Exec() error {
 		image.NewHandler(a.docker, a.keychain, a.LayoutDir, a.UseLayout, a.InsecureRegistries),
 		image.NewRegistryHandler(a.keychain, a.InsecureRegistries),
 	)
+
+	// If -pull-run-image is set and we're in layout mode, pull the run image from
+	// the registry into the layout directory so the analyzer can find it.
+	if a.PullRunImage && a.UseLayout && a.RunImageRef != "" {
+		if err := image.PullToLayout(a.keychain, a.RunImageRef, a.LayoutDir, a.InsecureRegistries); err != nil {
+			return cmd.FailErr(err, "pulling run image to layout directory")
+		}
+	}
+
 	analyzer, err := factory.NewAnalyzer(a.Inputs(), cmd.DefaultLogger)
 	if err != nil {
 		return unwrapErrorFailWithCode(err, a.CodeFor(platform.AnalyzeError), "initialize analyzer")
