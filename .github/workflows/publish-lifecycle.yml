@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - skip-chown
+      - buildkit-multi-arch-support
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,7 +34,17 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Publish images
         run: |
-          LIFECYCLE_IMAGE_TAG=skip-chown-poc
+          # Derive the image tag from the branch so each feature branch publishes
+          # its own tag and never clobbers another:
+          #   skip-chown                 -> jericop/lifecycle:skip-chown-poc
+          #   buildkit-multi-arch-support-> jericop/lifecycle:buildkit-multi-arch-support
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          if [ "${BRANCH}" = "skip-chown" ]; then
+            LIFECYCLE_IMAGE_TAG=skip-chown-poc
+          else
+            LIFECYCLE_IMAGE_TAG="${BRANCH}"
+          fi
+          echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (branch ${BRANCH})"
 
           LINUX_AMD64_SHA=$(go run ./tools/image/main.go -lifecyclePath ./out/lifecycle-v*+linux.x86-64.tgz -tag jericop/lifecycle:${LIFECYCLE_IMAGE_TAG}-linux-x86-64 | awk '{print $NF}')
           echo "LINUX_AMD64_SHA: $LINUX_AMD64_SHA"
