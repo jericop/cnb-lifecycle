@@ -8,6 +8,7 @@ import (
 	"github.com/buildpacks/imgutil/layout"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
@@ -47,7 +48,10 @@ func PullToLayout(keychain authn.Keychain, imageRef string, layoutDir string, in
 		return fmt.Errorf("creating layout directory %q: %w", fullPath, err)
 	}
 
-	layoutPath, err := layout.Write(fullPath, nil)
+	// layout.Write requires a non-nil v1.ImageIndex to initialize index.json;
+	// passing nil panics with a nil pointer dereference. Seed with an empty
+	// index and append the pulled image below.
+	layoutPath, err := layout.Write(fullPath, empty.Index)
 	if err != nil {
 		return fmt.Errorf("initializing layout at %q: %w", fullPath, err)
 	}
