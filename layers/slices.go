@@ -102,7 +102,7 @@ func (f *Factory) createLayerFromFiles(id int, createdBy string, sdir *sliceable
 		return files[i].Path < files[j].Path
 	})
 	layerID := fmt.Sprintf("slice-%d", id)
-	return f.writeLayer(layerID, createdBy, func(tw *archive.NormalizingTarWriter) error {
+	layer, err = f.writeLayer(layerID, createdBy, func(tw *archive.NormalizingTarWriter) error {
 		if len(files) != 0 {
 			if err := archive.AddFilesToArchive(tw, sdir.parentDirs); err != nil {
 				return err
@@ -113,6 +113,21 @@ func (f *Factory) createLayerFromFiles(id int, createdBy string, sdir *sliceable
 		}
 		return nil
 	})
+	if err != nil {
+		return Layer{}, err
+	}
+	// Record the filesystem source: the app dir + the EXACT files this slice
+	// contains (relative to the app dir), so a copy-based consumer reproduces the
+	// same slice split the lifecycle computed. An empty Include set means an empty
+	// slice layer (no files) — the consumer produces an empty layer.
+	include := make([]string, 0, len(files))
+	for _, fi := range files {
+		if rel, rerr := filepath.Rel(sdir.path, fi.Path); rerr == nil && rel != "." {
+			include = append(include, rel)
+		}
+	}
+	layer.Source = &LayerSource{Dir: sdir.path, Include: include, UID: f.UID, GID: f.GID}
+	return layer, nil
 }
 
 type sliceableDir struct {

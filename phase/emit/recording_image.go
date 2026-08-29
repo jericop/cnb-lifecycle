@@ -18,6 +18,7 @@
 package emit
 
 import (
+	"archive/tar"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,6 +61,35 @@ const (
 	LayersSubdir = "layers"
 )
 
+// LayerSource describes the FILESYSTEM SOURCE of a NEW layer so the consumer can
+// assemble the image with a native copy (llb.Copy) INSTEAD of building/extracting a
+// tar. It is populated in emit-mode for layers the lifecycle layer factory builds
+// from a real directory/file (buildpack layers, app slices, launcher). Layers that
+// are SYNTHESIZED with no filesystem source (e.g. process-types symlinks) do NOT
+// have a Source and fall back to a small emitted tar (TarPath).
+//
+// See the buildkit-native-export design ("Layer SOURCE REFS") + the decision record
+// spike-eliminate-metadata-rewrite.md (part 8).
+type LayerSource struct {
+	// Dir is the built-state directory to copy from (e.g. /layers/<bp>/<layer> or
+	// the app dir). For a single-file layer (launcher) use File instead.
+	Dir string `json:"dir,omitempty"`
+	// File is the built-state single file to copy (launcher binary).
+	File string `json:"file,omitempty"`
+	// Include, when non-empty (app slices), restricts the copy to these paths
+	// (relative to Dir) — the exact per-slice file selection the lifecycle computed.
+	Include []string `json:"include,omitempty"`
+	// Dest is the destination path in the image if it differs from the source
+	// path (e.g. launcher -> /cnb/lifecycle/launcher). Empty means copy in place.
+	Dest string `json:"dest,omitempty"`
+	// UID/GID are the ownership to normalize the copied entries to (matching the
+	// tar's NormalizingTarWriter). Consumer applies these as chown-on-copy.
+	UID int `json:"uid"`
+	GID int `json:"gid"`
+	// Mode, when non-zero, is the file mode to set (launcher: 0755).
+	Mode int64 `json:"mode,omitempty"`
+}
+
 // LayerOp is one recorded layer operation, in the order the exporter emitted it.
 type LayerOp struct {
 	// ID identifies the layer. For the MVP this is derived from History.CreatedBy
@@ -71,9 +101,15 @@ type LayerOp struct {
 	Reused bool `json:"reused"`
 	// DiffID is the layer's uncompressed digest (sha256:...). Always present.
 	DiffID string `json:"diffID"`
-	// TarPath is the path to the ACTUAL layer tar the lifecycle built. Present
-	// only when Reused is false. It is recorded verbatim (never re-tarred), so the
-	// emitted diffID matches a normal export exactly (rebase/diffID parity).
+	// Source, when set, is the filesystem source the consumer copies from
+	// (llb.Copy) to assemble this layer — no tar is built/materialized for it.
+	// Present for filesystem-backed NEW layers in emit-mode. See LayerSource.
+	Source *LayerSource `json:"source,omitempty"`
+	// TarPath is the path to a layer tar. In emit-mode it is present ONLY for
+	// SYNTHESIZED layers that have no filesystem Source (e.g. process-types); the
+	// consumer copies from a tiny extracted tree for those. (Historically this was
+	// set for every new layer; with Source refs it is now the synthesized-only
+	// fallback.)
 	TarPath string `json:"tar,omitempty"`
 	// History is the exact v1.History the exporter recorded for this layer.
 	History v1.History `json:"history"`
@@ -124,7 +160,32 @@ type RecordingImage struct {
 	// captured state (ordered)
 	layers []LayerOp
 	config ImageConfig
+	// layerSources maps a layer TarPath -> its filesystem Source, recorded by the
+	// exporter (in emit-mode) via RecordLayerSource so the consumer can assemble
+	// the layer with a native copy instead of extracting the tar. Keyed by TarPath
+	// because that is the value the exporter passes to
+	// AddLayerWithDiffIDAndHistory. Synthesized layers have no entry here.
+	layerSources map[string]LayerSource
 }
+
+// LayerSourceRecorder is the OPTIONAL interface the exporter type-asserts on its
+// WorkingImage to attach a filesystem Source to a new layer (emit-mode only). Only
+// RecordingImage implements it, so the normal export path is unaffected.
+type LayerSourceRecorder interface {
+	RecordLayerSource(tarPath string, src LayerSource)
+}
+
+// RecordLayerSource records the filesystem source for the layer whose tar is at
+// tarPath. Called by the exporter right before/after adding the layer. Matched to
+// the LayerOp by TarPath when the plan is assembled.
+func (r *RecordingImage) RecordLayerSource(tarPath string, src LayerSource) {
+	if r.layerSources == nil {
+		r.layerSources = map[string]LayerSource{}
+	}
+	r.layerSources[tarPath] = src
+}
+
+var _ LayerSourceRecorder = (*RecordingImage)(nil)
 
 // assert RecordingImage satisfies the interface at compile time.
 var _ imgutil.Image = (*RecordingImage)(nil)
@@ -259,12 +320,15 @@ func (r *RecordingImage) Save(_ ...string) error {
 		return errors.Wrapf(err, "emit: create output dir %s", dir)
 	}
 
-	// Persist the emitted layer tars into the output dir. The exporter builds them
-	// under a temp artifacts dir that is removed after Export() returns, so the
-	// consumer (which reads them from the build filesystem AFTER the export step)
-	// would not find them at their original path. Copy each into
-	// <outputDir>/<RecorderDir>/layers/ and rewrite TarPath to that stable
-	// location so the consumer can add each layer by its own tar.
+	// Build the persisted plan. For each NEW layer:
+	//   - If the exporter recorded a filesystem SOURCE for it (via
+	//     RecordLayerSource, keyed by TarPath), attach that Source and do NOT
+	//     persist a tar — the consumer assembles the layer with a native copy from
+	//     the source (no extraction, no materialization). This is the common case
+	//     for buildpack/app/launcher layers.
+	//   - Otherwise the layer is SYNTHESIZED (e.g. process-types symlinks) with no
+	//     filesystem source; persist its (tiny) tar so the consumer can copy from a
+	//     small extracted tree. Only these small layers are materialized.
 	layersOut := filepath.Join(dir, LayersSubdir)
 	if err := os.MkdirAll(layersOut, 0755); err != nil {
 		return errors.Wrapf(err, "emit: create layers dir %s", layersOut)
@@ -272,16 +336,33 @@ func (r *RecordingImage) Save(_ ...string) error {
 	persisted := make([]LayerOp, len(r.layers))
 	for i, l := range r.layers {
 		persisted[i] = l
-		if l.Reused || l.TarPath == "" {
+		if l.Reused {
 			continue
 		}
+		if src, ok := r.layerSources[l.TarPath]; ok {
+			// Filesystem-backed layer: emit the Source ref, drop the tar entirely.
+			s := src
+			persisted[i].Source = &s
+			persisted[i].TarPath = ""
+			continue
+		}
+		if l.TarPath == "" {
+			continue
+		}
+		// Synthesized layer (no source): persist its small tar AND an extracted
+		// tree next to it (a ".d" dir). The consumer copies from the tree (a native
+		// llb.Copy) rather than extracting the tar itself — no run-image tooling.
+		// These are tiny (e.g. process-types symlinks), so the extraction cost is
+		// negligible and it is the ONLY thing that gets materialized.
 		dstName := fmt.Sprintf("%03d-%s.tar", i, sanitizeLayerName(l.ID))
 		dstPath := filepath.Join(layersOut, dstName)
 		if err := copyFile(l.TarPath, dstPath); err != nil {
 			return errors.Wrapf(err, "emit: persist layer tar %s", l.TarPath)
 		}
-		// Record a path relative to the output dir root so the consumer can locate
-		// it deterministically regardless of absolute mount point.
+		treeDir := strings.TrimSuffix(dstPath, ".tar") + ".d"
+		if err := extractTarToDir(l.TarPath, treeDir); err != nil {
+			return errors.Wrapf(err, "emit: extract synthesized layer %s", l.TarPath)
+		}
 		persisted[i].TarPath = filepath.Join(RecorderDir, LayersSubdir, dstName)
 	}
 
@@ -303,15 +384,15 @@ func (r *RecordingImage) Save(_ ...string) error {
 
 	// Option A (build-then-finalize): also write the serialized BuildMetadata (the
 	// plan + emitted config labels) that the build phase sets as the
-	// BuildMetadataLabel on the produced image, and that finalize consumes. This is
-	// the single artifact the finalize step needs from the build. The plan here
-	// uses the ORIGINAL (non-persisted) layers so the intended diffIDs + reused
-	// flags are exactly what the exporter produced; TarPath is irrelevant to
-	// finalize.
+	// BuildMetadataLabel on the produced image, and that finalize consumes. Use the
+	// PERSISTED plan so the label carries the per-layer Source refs (used by the
+	// consumer to assemble via llb.Copy) AND the intended diffIDs + reused flags
+	// (used by finalize to remap SHAs). The build-metadata label is the single
+	// artifact the consumer + finalize need from the build.
 	bmPlan := Plan{
 		Schema:   Schema,
 		RunImage: PlanRunImage{Reference: r.runImageRef, TopLayer: topLayer},
-		Layers:   r.layers,
+		Layers:   persisted,
 	}
 	bm := NewBuildMetadata(bmPlan, r.config)
 	if err := writeJSON(filepath.Join(dir, BuildMetadataFileName), bm); err != nil {
@@ -333,6 +414,66 @@ func sanitizeLayerName(id string) string {
 		s = s[:80]
 	}
 	return s
+}
+
+// extractTarToDir extracts a (small, synthesized) layer tar into destDir in Go,
+// preserving dirs, regular files, and symlinks. Used ONLY for synthesized layers
+// (e.g. process-types symlinks) that have no filesystem source; the consumer copies
+// the resulting tree with a native llb.Copy (no run-image tar/shell). Kept minimal:
+// these layers are tiny and contain only dirs/files/symlinks.
+func extractTarToDir(tarPath, destDir string) error {
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return err
+	}
+	f, err := os.Open(filepath.Clean(tarPath))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// Guard against path traversal.
+		clean := filepath.Clean("/" + hdr.Name)
+		target := filepath.Join(destDir, clean)
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)&os.ModePerm); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode)&os.ModePerm)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out, tr); err != nil { //nolint:gosec // small synthesized layers only
+				out.Close()
+				return err
+			}
+			if err := out.Close(); err != nil {
+				return err
+			}
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+			_ = os.Remove(target)
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return err
+			}
+		default:
+			// Skip other types; synthesized layers only use the above.
+		}
+	}
 }
 
 // copyFile copies src to dst (used to persist emitted layer tars).

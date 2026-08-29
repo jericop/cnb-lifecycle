@@ -19,7 +19,7 @@ func (f *Factory) DirLayer(withID string, fromDir string, createdBy string) (lay
 	if err != nil {
 		return Layer{}, err
 	}
-	return f.writeLayer(withID, createdBy, func(tw *archive.NormalizingTarWriter) error {
+	layer, err = f.writeLayer(withID, createdBy, func(tw *archive.NormalizingTarWriter) error {
 		if err := archive.AddFilesToArchive(tw, parents); err != nil {
 			return err
 		}
@@ -27,4 +27,11 @@ func (f *Factory) DirLayer(withID string, fromDir string, createdBy string) (lay
 		tw.WithGID(f.GID)
 		return archive.AddDirToArchive(tw, fromDir)
 	})
+	if err != nil {
+		return Layer{}, err
+	}
+	// Record the filesystem source so a copy-based consumer can assemble this
+	// layer from fromDir (with the same uid/gid normalization) instead of the tar.
+	layer.Source = &LayerSource{Dir: fromDir, UID: f.UID, GID: f.GID}
+	return layer, nil
 }

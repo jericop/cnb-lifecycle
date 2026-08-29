@@ -469,3 +469,216 @@ already proven.
 This keeps the finalize library (already written) as the correctness core regardless
 of which build-assembly mechanism wins, since finalize only depends on the pushed
 image + the build-metadata label.
+
+---
+
+# Spike part 5: Can we remove the frontend entirely (do it with LLB from pack)?
+
+**Finding (verified in moby/buildkit v0.32.2):**
+
+- The container image exporter sources the output image CONFIG only from
+  `inp.Metadata[exptypes.ExporterImageConfigKey]` (writer.go:149,256).
+- That metadata is populated ONLY from a gateway `client.Result` (res.AddMeta(...)).
+- The `ExporterImage` export ATTRS recognized by a plain `client.Solve` are ONLY:
+  name, oci-mediatypes, oci-artifact, attestation-inline,
+  prefer-nondistributable-layers, rewrite-timestamp, + compression/annotations
+  (opts.go). There is NO `config` attr.
+
+=> A pure `client.Solve` + `ExporterImage` CANNOT set the image config/labels
+(entrypoint, env, io.buildpacks.buildkit.native.build-metadata). Setting config
+REQUIRES returning a `client.Result` with `ExporterImageConfigKey` — i.e. using
+`client.Build` with a `BuildFunc`.
+
+**What "remove the frontend" means, precisely:**
+
+There are two separable things:
+1. The `client.Build` + in-process `BuildFunc` MECHANISM — REQUIRED to set config.
+   This is idiomatic BuildKit gateway usage; it is NOT a separate deployed component.
+2. The standalone `buildkit/cnbfrontend` PACKAGE + `cmd/cnb-frontend` IMAGE — a
+   distinct component with option-key plumbing, meant to be publishable as a
+   `#syntax=` frontend. THIS is what we remove.
+
+So: DELETE the `cnbfrontend` package + `cmd/cnb-frontend`, and move a SMALL
+in-process `BuildFunc` into pack (`internal/build/multiplatform`). Pack calls
+`bkClient.Build(ctx, solveOpt, "", <pack BuildFunc>, ch)`. No separate frontend
+package/image; pack uses the gateway API directly. This satisfies "do it with LLB
+directly from pack, remove the frontend."
+
+The BuildFunc shrinks dramatically vs cnbfrontend:
+- KEEP: build LLB graph (phases), assemble FROM run-image, read build-metadata.json,
+  return per-platform refs + config with the build-metadata label.
+- DROP (moved out / no longer needed): the OptBuilderImage/OptRunImage/... frontend
+  OPTION plumbing (pack passes values directly as Go args/closures, not gateway
+  Opts), the standalone grpcclient entrypoint, the emit tar-persistence if we switch
+  assembly to llb.Copy of trees.
+- CHANGE: assembly uses per-layer `llb.Copy` of the emit LAYER TREES (see part 4)
+  instead of `RUN tar -xf` — no shell/tar, works on any run image.
+
+**Emit-mode change for llb.Copy assembly:** emit-mode Save() extracts each new
+layer's tar into a directory TREE under the emit output dir (in Go via archive/tar,
+no external tar), records the tree path in the plan. Frontend/BuildFunc does
+`llb.Copy(built, "<tree>", "/")` per layer onto the run-image base — pure FileOp,
+one layer per CNB layer (boundaries preserved), no run-image tooling.
+
+**Plan:**
+1. Lifecycle emit-mode: write per-layer extracted TREES (+ keep build-metadata.json).
+   Record tree paths in the plan.
+2. Pack: add an in-process BuildFunc (new file in internal/build/multiplatform) that
+   builds the graph, assembles FROM run-image via llb.Copy of trees, sets config +
+   build-metadata label, returns per-platform result. Pack's NativeBackend calls
+   client.Build with it (in place of cnbfrontend.Build).
+3. DELETE lifecycle buildkit/cnbfrontend + cmd/cnb-frontend. Update pack imports.
+   (The BuildFunc lives in PACK — it needs no lifecycle internals beyond the emit
+   types pack already imports.)
+4. Finalize unchanged.
+5. Re-validate the full repeated-cycle matrix + shell-less run image if feasible.
+
+**Where should the BuildFunc live — pack or lifecycle?** It only needs: the LLB
+graph (pack already builds this in backend_native.buildEmitGraph + LLBBackend), the
+emit types (pack imports emit), and the run-image resolution (reads analyzed.toml).
+None of that is lifecycle-internal. So the BuildFunc belongs in PACK. The lifecycle
+keeps only: emit-mode (plan + trees + build-metadata.json) and the finalize library.
+This fully removes the lifecycle-side frontend.
+
+---
+
+# Spike part 6: assembly should MATERIALIZE NOTHING large — llb.Copy from built paths
+
+Correcting part-4/part-5 step 1 ("extract each layer tar into a tree"): that would
+materialize EVERY new layer (incl. the whole app + deps) inside BuildKit — wasteful.
+It is unnecessary.
+
+## What each new CNB layer actually is (from lifecycle/layers)
+
+- DirLayer (buildpack layers) + SliceLayers (app): tar of a real dir tree
+  (`/layers/<bp>/<layer>/`, `/workspace`) with uid/gid NORMALIZED to the CNB user.
+  The files ALREADY EXIST at those paths in the built state.
+- LauncherLayer: single binary at `/cnb/lifecycle/launcher`, root:root 0755. Exists
+  in the built state.
+- ProcessTypesLayer: SYNTHESIZED symlinks `/cnb/process/<type>` -> launcher. Does
+  NOT exist as files in the built state; constructed in-memory. Tiny.
+- config / sbom: small json/toml.
+
+## Corrected assembly: hybrid, materialize nothing large
+
+- LARGE real trees (app, buildpack layers, launcher): `llb.Copy` DIRECTLY from the
+  built state's existing paths — NO extraction, NO duplication. Use llb.Copy's
+  ChownOpt to normalize ownership to the CNB uid/gid (matches the tar's
+  normalization). BuildKit references existing content; unchanged layers cache-hit.
+- SMALL / synthesized (process-types symlinks, and any layer whose exact bytes are
+  not reproducible from a built path — e.g. synthesized symlinks): these are tiny;
+  extract ONLY THESE into a small tree (in Go, in emit-mode) and llb.Copy the tree.
+  This is the "only extract what we need" case — kilobytes, not the app.
+
+## Why this is better (answers the build-time + caching question)
+
+- Build time: no unpack of large layers (old `RUN tar -xf` unpacked everything,
+  incl. the app). For a large Node/Python app this avoids re-materializing hundreds
+  of MB. Only tiny config/symlink layers are extracted.
+- Caching: each llb.Copy is keyed on the SOURCE CONTENT hash. An unchanged buildpack
+  dependency layer -> copy is a CACHE HIT (BuildKit reuses it); only changed layers
+  recopy. The old per-layer `RUN tar -xf` re-ran the unpack and cached worse.
+- No run-image tooling (FileOp, not shell/tar) -> works on distroless run images.
+- Layer boundaries preserved: one llb.Copy per CNB layer = one layer per CNB layer,
+  in plan order (buildpack-layer patching still works; finalize still authors SHAs).
+
+## Open items to confirm during implementation
+
+1. uid/gid: confirm llb.Copy ChownOpt reproduces the lifecycle's normalized
+   ownership so diffIDs are internally consistent (finalize authors SHAs regardless,
+   but the FILES must match what metadata describes for a runnable image).
+2. App SLICES: slices split /workspace into N layers by glob. To reproduce via
+   llb.Copy, copy the per-slice path sets; if fiddly, extract ONLY the app-slice
+   tars (app is the one large sliced thing) as the targeted-extract fallback. Common
+   no-slice case (samples/go/no-imports) is a single `llb.Copy /workspace`.
+3. process-types: always the small-tree-extract path (synthesized symlinks).
+
+The plan (parts 4-5) is otherwise unchanged: remove the cnbfrontend package + image,
+move a minimal BuildFunc into pack (client.Build to set config + build-metadata
+label), finalize unchanged, re-validate repeated cycles + ideally a shell-less run
+image.
+
+---
+
+# Spike part 8: DECISION — emit LAYER SOURCE REFS (not tars); assemble via llb.Copy
+
+Supersedes parts 6-7's staged fallback. We are already modifying the lifecycle, so
+fix it at the right place: the exporter's layer factory ALREADY receives each
+layer's SOURCE at the moment it builds the tar (`DirLayer(id, fromDir)`,
+`SliceLayers(dir, slices)`, `LauncherLayer(path)`). Emit-mode currently discards the
+source and keeps only the produced tar. Instead, in emit-mode, RECORD THE SOURCE REF
+and SKIP tarring for layers that have a filesystem source. Pack assembles with
+`llb.Copy` from that source (applying the same uid/gid normalization). Nothing large
+is materialized; the tar is never built for these layers.
+
+## Why this is the right approach (not the tar-tree fallback)
+
+- The SOURCE PATH is authoritative and KNOWN at factory-call time — no reverse-
+  engineering paths from layer IDs (the fragility that blocked llb.Copy earlier).
+- The lifecycle computes the exact file selection (esp. app SLICES: which files land
+  in each slice by glob) — so pack does not guess; emit records the resolved per-slice
+  path sets.
+- No materialization of large layers (app/deps), no run-image shell/tar, better
+  caching (each llb.Copy keyed on source content -> unchanged buildpack layer is a
+  cache hit), and the frontend is removed.
+
+## Per-layer-type mapping
+
+| Layer | Factory source | Emitted Source | Assembly |
+|-------|----------------|----------------|----------|
+| Buildpack (DirLayer) | fromDir = /layers/<bp>/<layer> | {dir, uid, gid} | llb.Copy(dir -> dir) chown uid:gid |
+| App (SliceLayers) | dir=/workspace + resolved slice path sets | {dir, includePaths[], uid, gid} | llb.Copy per slice with includes, chown |
+| Launcher (LauncherLayer) | launcher binary path | {file, dest=/cnb/lifecycle/launcher, mode 0755, root} | llb.Copy(file -> dest) chown 0:0 mode 0755 |
+| ProcessTypes (synthesized symlinks) | NONE (in-memory) | small emitted TAR (fallback) | llb.Copy from a tiny extracted tree |
+| SBOM / config (small) | dir | {dir,...} OR small tar | llb.Copy |
+
+Layers WITHOUT a filesystem source (process-types symlinks; potentially others that
+are synthesized) fall back to a SMALL emitted tar — kilobytes only. Everything with a
+real source is emitted as a source ref (no tar, no materialization).
+
+## Contract change (emit v1 -> keep schema, additive)
+
+Extend LayerOp with an optional `Source`:
+
+```
+LayerOp {
+  id, reused, diffID, history            // as today
+  source: {                              // present for filesystem-backed NEW layers
+    dir      string                      // built-state path to copy from
+    include  []string                    // optional (app slices): only these paths
+    uid, gid int                         // normalization to apply on copy
+    mode     int   (optional)            // launcher: 0755
+    dest     string (optional)           // where it lands if != dir (launcher)
+  }
+  tar      string (optional)             // ONLY for synthesized layers w/o a source
+}
+```
+
+Emit-mode: when a layer has a filesystem source, populate `source` and DO NOT write a
+tar. When synthesized (process-types), write the small tar as today (into the emit
+dir). build-metadata.json still carries the plan + emitted labels for finalize.
+
+## Implementation touch points
+
+- lifecycle layers.Factory / phase.Exporter: in emit-mode, thread the source
+  (fromDir / slice path-sets / launcher path) into the recorded LayerOp instead of
+  (or in addition to) building the tar. Guarded by emit-mode; normal export path
+  unchanged. This is the localized exporter change your "read from filesystem" flag
+  idea enables.
+- pack in-process BuildFunc: assemble FROM run-image by, per NEW layer, `llb.Copy`
+  from `source.dir` (with include/chown/dest) onto the base; for a `tar`-only layer,
+  copy from its small extracted tree. Set config + build-metadata label via the
+  gateway result. Remove cnbfrontend.
+- finalize: unchanged (authors metadata from produced diffIDs).
+
+Diffs vs a normal export are still allowed (BuildKit recomputes diffIDs on Copy);
+finalize reconciles the metadata. Rebase depends only on the run-image boundary.
+
+## Reason captured for the spec
+
+The metadata rewrite/finalize solved WHO authors metadata. This decision solves HOW
+the layers get into the image efficiently: let the lifecycle (which knows the exact
+sources + file selection) emit SOURCE REFERENCES, and let BuildKit copy them
+natively (llb.Copy) — no tar build, no extraction, no large materialization, no
+run-image tooling, and per-layer cache reuse. It removes the frontend because pack
+can express the whole assembly as LLB directly from the emitted source refs.

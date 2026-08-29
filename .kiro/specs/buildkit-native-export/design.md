@@ -84,6 +84,43 @@ needs; new fields may be added without adding image layers. It is namespaced
 `io.buildpacks.lifecycle.metadata` (the build phase never pre-writes a valid final
 label).
 
+## Layer SOURCE REFS: emit assembles-by-copy, not by tar (decision)
+
+Emit-mode records each NEW layer as a SOURCE REFERENCE (the filesystem source the
+lifecycle layer factory already has) instead of building/persisting a tar, so the
+consumer (pack) assembles the image with `llb.Copy` from those sources — no tar
+build, no extraction, no materialization of large layers, and no run-image
+shell/tar. Decision record + rationale:
+`cnb-buildkit-frontend/spike-eliminate-metadata-rewrite.md` (part 8).
+
+WHY: the layer factory receives each layer's SOURCE at build time —
+`DirLayer(id, fromDir)`, `SliceLayers(dir, slices)`, `LauncherLayer(path)`. That
+source (and, for app slices, the exact per-slice file selection the lifecycle
+computes) is authoritative. Emitting it lets BuildKit copy the files natively;
+recomputed diffIDs are reconciled by finalize. This avoids reverse-engineering paths
+from layer IDs (fragile) and avoids materializing the app/dependency layers.
+
+Each `LayerOp` gains an optional `Source` (populated in emit-mode for
+filesystem-backed layers; the tar is NOT built for these):
+
+```jsonc
+"source": {
+  "dir":     "/layers/<bp>/<layer>",   // built-state path to copy from
+  "include": ["..."],                  // optional (app slices): only these paths
+  "uid": 1001, "gid": 1001,            // normalization to apply on copy
+  "mode":    493,                      // optional (launcher: 0755)
+  "dest":    "/cnb/lifecycle/launcher" // optional: destination if != dir
+}
+```
+
+SYNTHESIZED layers with NO filesystem source (e.g. `ProcessTypesLayer`, which builds
+symlinks in-memory) fall back to a SMALL emitted tar (kilobytes) that the consumer
+`llb.Copy`s from a tiny extracted tree. Only these synthesized layers are
+materialized; the large real layers are copied from their sources.
+
+Normal (non-emit) export is unchanged — it still builds tars and pushes an image.
+The source-ref behavior is emit-mode-only.
+
 ---
 
 ## (Retained) Emit-mode plan computation — how the ordered plan is produced

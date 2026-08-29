@@ -42,6 +42,25 @@ type Layer struct {
 	TarPath string
 	Digest  string
 	History v1.History
+	// Source, when set, describes the FILESYSTEM SOURCE this layer was built from
+	// (the dir/file the factory tarred, plus normalization). It lets a consumer
+	// (BuildKit-native export emit-mode) assemble the layer with a native copy
+	// instead of extracting the tar. It is informational and does NOT affect the
+	// tar the factory builds — normal export ignores it. Nil for synthesized
+	// layers with no filesystem source (e.g. process-types symlinks).
+	Source *LayerSource
+}
+
+// LayerSource describes the filesystem source of a Layer for consumers that
+// assemble by copy rather than by tar. See Layer.Source.
+type LayerSource struct {
+	Dir     string   // directory to copy from (buildpack/app/config layers)
+	File    string   // single file to copy (launcher binary)
+	Include []string // optional: restrict to these paths (app slices)
+	Dest    string   // destination if different from source (launcher)
+	UID     int      // ownership normalization applied by the factory
+	GID     int
+	Mode    int64 // optional file mode (launcher: 0755)
 }
 
 func (f *Factory) writeLayer(id, createdBy string, addEntries func(tw *archive.NormalizingTarWriter) error) (layer Layer, err error) {

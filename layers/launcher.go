@@ -32,7 +32,7 @@ func (f *Factory) LauncherLayer(path string) (layer Layer, err error) {
 	hdr.Gid = 0
 	hdr.Mode = 0755
 
-	return f.writeLayer("buildpacksio/lifecycle:launcher", LauncherLayerName, func(tw *archive.NormalizingTarWriter) error {
+	layer, err = f.writeLayer("buildpacksio/lifecycle:launcher", LauncherLayerName, func(tw *archive.NormalizingTarWriter) error {
 		for _, dir := range parents {
 			if err := tw.WriteHeader(dir); err != nil {
 				return err
@@ -52,6 +52,13 @@ func (f *Factory) LauncherLayer(path string) (layer Layer, err error) {
 		}
 		return nil
 	})
+	if err != nil {
+		return Layer{}, err
+	}
+	// Record the filesystem source: copy the launcher binary to its image path,
+	// root-owned 0755. (llb.Copy creates the /cnb/lifecycle parents automatically.)
+	layer.Source = &LayerSource{File: path, Dest: launch.LauncherPath, UID: 0, GID: 0, Mode: 0755}
+	return layer, nil
 }
 
 // ProcessTypesLayer creates a Layer containing symlinks pointing to target where:
