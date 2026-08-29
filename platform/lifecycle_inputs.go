@@ -51,6 +51,11 @@ type LifecycleInputs struct {
 	ProjectMetadataPath   string
 	ReportPath            string
 	RunImageRef           string
+	// EmitExportPlan, when non-empty, opts export into BuildKit-native emit-mode:
+	// instead of assembling and pushing an image, the exporter records its
+	// operations and writes the emit contract (buildkit/plan.json + config.json)
+	// under this directory. Additive/opt-in; empty means normal export.
+	EmitExportPlan string
 	RunPath               string
 	StackPath             string
 	SystemPath            string

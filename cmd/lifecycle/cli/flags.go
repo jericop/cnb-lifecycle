@@ -53,6 +53,10 @@ func FlagExtendedDir(extendedDir *string) {
 	flagSet.StringVar(extendedDir, "extended", *extendedDir, "path to output directory for image layers created from applying generated Dockerfiles")
 }
 
+func FlagEmitExportPlan(emitExportPlan *string) {
+	flagSet.StringVar(emitExportPlan, "emit-export-plan", *emitExportPlan, "EXPERIMENTAL: opt into BuildKit-native emit-mode; path to output directory for the emit contract (buildkit/plan.json + config.json) instead of assembling/pushing an image")
+}
+
 func FlagExtensionsDir(extensionsDir *string) {
 	flagSet.StringVar(extensionsDir, "extensions", *extensionsDir, "path to extensions directory")
 }

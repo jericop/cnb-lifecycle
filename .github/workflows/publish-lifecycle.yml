@@ -5,6 +5,7 @@ on:
     branches:
       - skip-chown
       - buildkit-multi-arch-support
+      - buildkit-native-export
   workflow_dispatch:
 
 permissions:
