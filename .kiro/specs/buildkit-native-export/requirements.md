@@ -1,194 +1,196 @@
-# Requirements: Lifecycle BuildKit-Native Export Emit-Mode
+# Requirements: Lifecycle BuildKit-Native Export (emit-mode + finalize)
 
 ## Introduction
 
-This is the LIFECYCLE-SIDE half of the "BuildKit-Native Export" (Option C) effort.
-The pack-side half lives in `jericop/cnb-pack@buildkit-native-export`
-(`.kiro/specs/buildkit-native-export/`). This spec owns the lifecycle changes; the
+This is the LIFECYCLE-SIDE half of the "BuildKit-Native Export" (Option A —
+build-then-finalize) effort. The pack-side half lives in
+`jericop/cnb-pack@buildkit-native-export`. This spec owns the lifecycle changes; the
 pack spec owns consuming them.
 
-Goal: add an EXPERIMENTAL, additive, OPT-IN lifecycle mode ("emit-mode") that lets
-BuildKit assemble the final CNB app image natively (`FROM <run-image>` + add
-builder-phase layers + apply CNB config), while the lifecycle remains the source of
-buildpacks truth. Instead of the exporter mutating and pushing an `imgutil.Image`,
-emit-mode EMITS the buildpacks-specific outputs that a caller (pack) turns into a
-BuildKit assembly:
+The design (see the frontend spec's `spike-eliminate-metadata-rewrite.md` for the
+decision record): BuildKit BUILDS and PUSHES a normal app image; a lifecycle-owned
+FINALIZE step then makes that pushed image buildpacks-compliant by authoring the
+correct `io.buildpacks.lifecycle.metadata` from the image's ACTUAL produced layer
+diffIDs plus an ordered plan the build surfaced as a label. This keeps 100% of CNB
+metadata authorship in the lifecycle, requires NO frontend and NO post-push layer
+changes, and produces correct metadata authored against reality (not patched from a
+stale emitted label).
 
-- an ordered **Layer Plan** (which layers, order, diffIDs, history, launch/cache
-  flags, and which are reused run-image layers), and
-- the final **Image Config** (entrypoint, cmd, env, workingdir, and the
-  `io.buildpacks.*` labels, incl the serialized lifecycle-metadata + build-metadata
-  labels).
+The lifecycle provides two things:
 
-This keeps 100% of CNB semantics in the lifecycle (no reimplementation in pack or
-BuildKit), avoids egressing large layer data to the host, and avoids
-intermediate-tag pushes.
+1. **Emit-mode (the ordered plan).** The exporter, run in emit-mode, computes the
+   ordered layer plan (which layers, order, new-vs-reused, intended diffIDs, history,
+   layer identity, run-image boundary). This plan is surfaced onto the built image as
+   the `io.buildpacks.buildkit.native.build-metadata` LABEL (a build-phase artifact,
+   distinct from the final CNB metadata label).
+2. **Finalize (author the real metadata).** A library API (+ subcommand) that, given
+   a built image ref and the build-metadata label, reads the image's ACTUAL produced
+   layer diffIDs and authors the correct `io.buildpacks.lifecycle.metadata` (per-layer
+   SHAs = produced diffIDs; `RunImage.TopLayer`/`Reference` = the run-image boundary),
+   then re-pushes ONLY the image config + manifest.
 
-This spec defines the EMIT CONTRACT (the exact shape of what emit-mode produces).
-That contract is the interface the pack-side spec consumes; changes to it must be
-reflected in both specs.
+Detector and builder are unchanged. Only the export/metadata authoring gains these
+additive, opt-in modes. Default `export` behavior is unchanged.
 
-Detector and builder are unchanged (they still run as the normal lifecycle phases
-/ binary). Only the EXPORT step gains an emit-mode alternative.
+### What changed from the earlier iteration
+
+The earlier design had a custom frontend re-extract layers and pack REWRITE the
+metadata SHAs post-push (a workaround for BuildKit reassigning diffIDs during
+re-extraction). This is replaced: no re-extraction, and metadata is AUTHORED (not
+patched) by a lifecycle finalize step from the produced diffIDs. Emit-mode no longer
+persists layer tars or drives assembly; it only produces the ordered plan for the
+label. The `io.buildpacks.native.layer-order` temp label is superseded by the richer
+`io.buildpacks.buildkit.native.build-metadata` label.
 
 ## Glossary
 
-- **emit-mode**: an opt-in export path that emits a plan + config (+ layer tars)
-  instead of assembling/pushing an image.
-- **Layer Plan**: the ordered set of layer descriptors emit-mode produces.
-- **Image Config**: the container image config metadata emit-mode produces
-  (entrypoint/env/workingdir/labels/history).
-- **Reused layer**: a run-image (base) layer referenced by digest that the caller
-  must reference from the run image rather than re-add.
-- **Emitted layer tar**: for non-reused layers, the actual layer tar the lifecycle
-  built (already under `/layers`), plus its precomputed diffID, so the caller adds
-  it by digest (guaranteeing rebase/diffID parity).
+- **emit-mode**: an opt-in export path that computes the ordered layer plan instead
+  of assembling/pushing an image.
+- **Layer Plan**: the ordered set of layer descriptors emit-mode produces (order,
+  new-vs-reused, intended diffID, identity, history) + the run-image boundary.
+- **build-metadata label**: `io.buildpacks.buildkit.native.build-metadata` — the
+  serialized Layer Plan, carried as an image LABEL by the build phase for finalize to
+  consume. Namespaced `io.buildpacks.buildkit.native.*`; distinct from the final
+  `io.buildpacks.lifecycle.metadata`.
+- **Produced diffID**: the diffID BuildKit actually assigned to a layer at export
+  (read from the built image config); authoritative for the finalized metadata.
+- **Finalize**: the lifecycle library API (+ subcommand) that authors
+  `io.buildpacks.lifecycle.metadata` on a built image from the build-metadata label +
+  the produced diffIDs, and re-pushes config+manifest only.
 
 ## Requirements
 
-### Requirement 1: Additive, opt-in emit-mode
+### Requirement 1: Additive, opt-in emit-mode (the ordered plan)
 
-**User Story:** As a lifecycle maintainer, I want emit-mode to be additive and
-opt-in, so that default `export` behavior (assemble + push an image) is unchanged.
+**User Story:** As a lifecycle maintainer, I want emit-mode additive and opt-in, so
+default `export` behavior is unchanged.
 
 #### Acceptance Criteria
 
-1. THE lifecycle SHALL provide an OPT-IN way to run export in emit-mode (e.g. a new
-   flag such as `-emit-export-plan <dir>` on the exporter, or an equivalent
-   library entry point) that does NOT mutate or push an image.
+1. THE lifecycle SHALL provide an OPT-IN way to run export in emit-mode (e.g.
+   `-emit-export-plan <dir>` or an equivalent library entry point) that does NOT
+   mutate or push an image.
 2. WHEN emit-mode is NOT selected THE existing export behavior SHALL be unchanged.
 3. THE emit-mode SHALL REUSE the existing layer-building and metadata logic
-   (`layers.Factory`, `files.LayersMetadata`/`BuildMetadata`, `platform` labels),
-   not a parallel reimplementation.
+   (`layers.Factory`, `files.LayersMetadata`/`BuildMetadata`, `platform` labels), not
+   a parallel reimplementation.
 
 ### Requirement 2: Emit the ordered Layer Plan
 
-**User Story:** As a caller (pack), I want an ordered, complete description of the
-layers to assemble, so that BuildKit can add them onto the run-image base in the
-correct order.
+**User Story:** As the finalize step, I want an ordered, complete description of the
+layers, so I can map the image's produced diffIDs to CNB layer identities.
 
 #### Acceptance Criteria
 
 1. THE emitted Layer Plan SHALL list, IN ORDER, every layer the exporter would add
    (buildpack launch layers, launcher, launcher-process-types, app slices, SBOM
    launch layer), matching the exporter's current ordering.
-2. EACH plan entry SHALL indicate whether it is a REUSED run-image/base layer
-   (referenced by digest) or a NEW layer produced by this build.
-3. EACH NEW layer entry SHALL include its diffID and the tar location (a path to
-   the actual layer tar the lifecycle built) so the caller can add it by digest.
-4. EACH entry SHALL include the `v1.History` the exporter would record for that
-   layer.
-5. THE plan SHALL include the identifiers needed to record the run-image rebase
-   boundary (runImage.reference, topLayer) consistent with the lifecycle-metadata
-   label.
+2. EACH plan entry SHALL indicate whether it is a REUSED run-image/base layer or a
+   NEW layer produced by this build.
+3. EACH entry SHALL include its intended diffID, its layer IDENTITY (which CNB
+   component / buildpack+layer it is), and the `v1.History` the exporter would record.
+4. THE plan SHALL include the run-image rebase boundary (runImage.reference,
+   topLayer) consistent with a normal export's lifecycle-metadata label.
 
-### Requirement 3: Emit the Image Config
+### Requirement 3: Surface the plan as the build-metadata LABEL (not a layer)
 
-**User Story:** As a caller (pack), I want the final image config the exporter
-would set, so BuildKit can apply it to the assembled image.
+**User Story:** As the finalize step, I want the plan carried as image metadata, not
+a runtime layer.
 
 #### Acceptance Criteria
 
-1. THE emitted Image Config SHALL include: Entrypoint (the launcher /
-   `/cnb/process/<default>`), Cmd (empty as today), Env (CNB_LAYERS_DIR,
-   CNB_APP_DIR, CNB_PLATFORM_API, PATH, deprecation mode, etc. as the exporter
-   sets), and WorkingDir (app dir).
-2. THE emitted Image Config SHALL include ALL labels the exporter sets: the
-   serialized `io.buildpacks.lifecycle.metadata`, `io.buildpacks.build.metadata`,
-   `io.buildpacks.project.metadata`, `io.buildpacks.exec-env` (when applicable),
-   and any buildpack-provided labels.
-3. THE emitted config values SHALL be IDENTICAL to what the current exporter would
-   set for the same inputs (so the assembled image is equivalent).
+1. THE emitted plan SHALL be serializable to a single image LABEL
+   `io.buildpacks.buildkit.native.build-metadata` (JSON), with a `schema` field for
+   versioning.
+2. THE emit-mode SHALL NOT require adding any image LAYER to carry the plan.
+3. THE build phase SHALL NOT pre-write a valid final `io.buildpacks.lifecycle.metadata`
+   label with stale SHAs; the build-metadata label is a distinct, explicitly
+   build-phase artifact.
 
-### Requirement 4: Rebase-safe, diffID-preserving emission
+### Requirement 4: Finalize authors CNB metadata from the produced image
 
-**User Story:** As a buildpacks user, I want rebase to keep working, so swapping
-the run image later does not require a rebuild.
+**User Story:** As a buildpacks user, I want a lifecycle-owned step that makes a
+pushed image buildpacks-compliant using the image's actual layers.
 
 #### Acceptance Criteria
 
-1. THE emitted NEW layer tars SHALL be the ACTUAL tars the lifecycle built (not a
-   re-tar by the caller), and their diffIDs SHALL be emitted, so the assembled
-   image's layer digests match a normal export.
-2. THE emitted plan SHALL identify reused run-image layers by digest so the caller
-   references the run image's ORIGINAL blobs (no re-tar).
-3. THE emitted lifecycle-metadata label (runImage.reference/topLayer, layer SHAs)
-   SHALL match a normal export for the same inputs, so rebase parity holds.
+1. THE lifecycle SHALL provide a FINALIZE library API (+ a subcommand wrapper) that
+   takes a built image reference (single image or manifest list) and, using the
+   `io.buildpacks.buildkit.native.build-metadata` label and the image's ACTUAL
+   produced layer diffIDs, authors the correct `io.buildpacks.lifecycle.metadata`.
+2. THE authored metadata SHALL set every per-layer `sha` (`App[]`, `Launcher`,
+   `Config`, `ProcessTypes`, each `Buildpacks[].layers[<name>].sha`, and `sbom`) to
+   the ACTUAL produced diffID for that layer, and SHALL set
+   `RunImage.TopLayer`/`Reference` to the run-image boundary.
+3. FINALIZE SHALL also author the other export labels it is responsible for
+   (`io.buildpacks.build.metadata`, `io.buildpacks.project.metadata`, exec-env when
+   applicable) consistent with a normal export, from data carried in the
+   build-metadata label.
+4. FINALIZE SHALL re-push ONLY the image config + manifest (+ index for a manifest
+   list). It SHALL NOT add, remove, re-tar, or re-upload any layer.
+5. FINALIZE SHALL be IDEMPOTENT: finalizing an already-finalized image re-authors
+   identical metadata (no drift across repeated cycles).
+6. THE finalize config+manifest re-push SHALL be TAG-ATOMIC: the tag resolves to
+   either the pre-finalize or the finalized image, never a partial one; on failure
+   the pre-finalize image remains pullable/runnable.
 
-### Requirement 5: Do not require in-lifecycle image assembly or push
+### Requirement 5: Finalize is consumable as a library (like Rebaser)
 
-**User Story:** As the caller, I want emit-mode to avoid touching a registry or
-building the final image, so BuildKit owns assembly and there are no
-intermediate-tag pushes.
-
-#### Acceptance Criteria
-
-1. THE emit-mode SHALL NOT push to any registry.
-2. THE emit-mode SHALL NOT require constructing a final `imgutil.Image`.
-3. THE emit-mode SHALL run given the same inputs the exporter uses today (the
-   `/layers` dir, app dir, analyzed metadata, run-image metadata, launcher config,
-   platform API), producing only the plan + config (+ referenced tars).
-
-### Requirement 6a: Platform API compatibility (>= 0.7)
-
-**User Story:** As a buildpacks user on a current production buildpack (Buildpack
-API 0.7+), I want emit-mode to work across the Platform API versions this lifecycle
-supports, so I am not forced onto a newer Platform API.
+**User Story:** As pack, I want to call finalize in-process the way I call
+`phase.Rebaser`, so metadata authorship stays in the lifecycle.
 
 #### Acceptance Criteria
 
-1. THE emit-mode SHALL produce a correct plan + config for every Platform API this
-   lifecycle supports (0.7 through 0.15), by recording exactly the operations the
-   exporter performs for the negotiated Platform API (no per-version logic in the
-   recorder).
-2. THE emitted `config.json` SHALL include `CNB_PLATFORM_API` set to the negotiated
-   Platform API (as the exporter sets today), so consumers know which API produced
-   the image.
-3. Platform API is negotiated between the platform and the lifecycle; it is NOT the
-   buildpack-level `api` (Buildpack API). Emit-mode SHALL NOT require any change to
-   how the Platform API is negotiated.
+1. THE finalize API SHALL be a Go package/function pack can import and call directly
+   (single source of truth; no duplicated CNB metadata logic in pack).
+2. THE finalize API SHALL operate on a registry image reference using standard image
+   access (e.g. go-containerregistry), consistent with how the lifecycle/pack already
+   read+write image config for rebase.
+3. THE subcommand wrapper SHALL allow the same operation to run standalone (for a
+   future self-healing/repair tool), reading the durable build-metadata label from an
+   already-pushed image.
 
-### Requirement 6b: Recorder-namespaced, extensible emit format
+### Requirement 6: Rebase-safe, diffID-consistent result
 
-**User Story:** As a maintainer, I want the emit format namespaced per recorder, so
-a buildah/podman recorder can be added later without breaking the BuildKit contract.
+**User Story:** As a buildpacks user, I want rebase to keep working after finalize.
 
 #### Acceptance Criteria
 
-1. THE BuildKit-native recorder SHALL write its files under a recorder-specific
-   location (e.g. `<emit-dir>/buildkit/`) and self-identify via a `schema` field
-   (`buildkit-native-export/v1`).
-2. THE format SHALL allow additional recorders (e.g. buildah/podman) to emit their
-   own schema under their own subdirectory WITHOUT changing the BuildKit contract.
+1. AFTER finalize THE `io.buildpacks.lifecycle.metadata` `RunImage.TopLayer` SHALL
+   correctly identify the run-image/app boundary in the built image, so the Rebaser
+   succeeds.
+2. AFTER finalize every per-layer metadata SHA SHALL equal the actual produced layer
+   diffID, so buildpack-contributed-layer patching can locate layers by sha.
+3. App-layer diffIDs NEED NOT match a registry/oci-layout export of the same build;
+   correctness comes from finalize authoring metadata against the ACTUAL layers.
 
-### Requirement 6: Documented emit contract (interface with pack)
+### Requirement 7: Platform API compatibility (>= 0.7)
 
-**User Story:** As a maintainer of both repos, I want the emit output shape
-documented as a stable contract, so the pack-side consumer stays in sync.
-
-#### Acceptance Criteria
-
-1. THE emit output shape (plan.json + config.json schemas + how layer tars are
-   referenced) SHALL be documented in this spec's design as THE contract.
-2. WHEN the contract changes THE change SHALL be reflected here AND in the
-   pack-side `buildkit-native-export` spec.
-
-### Requirement 7: Local, MVP validation (tests deferred until pack e2e confirms)
-
-**User Story:** As a maintainer, I want emit-mode validated simply and locally
-first, so we confirm pack can actually use it before investing in automated tests.
+**User Story:** As a buildpacks user on a current buildpack (Buildpack API 0.7+), I
+want emit-mode + finalize to work across the Platform API versions this lifecycle
+supports.
 
 #### Acceptance Criteria
 
-1. FOR the MVP, emit-mode SHALL be validated by running it against a real `/layers`
-   produced by a build and driving the pack-side e2e (the two-build CLI strategy),
-   NOT by new Go unit/integration tests.
-2. Automated unit + integration tests (the recording-image capture, the
-   plan/config serializer, and the export-parity integration test) SHALL be
-   DEFERRED until AFTER the pack MVP is confirmed working end-to-end, then added.
-3. WHEN automated tests are added, they SHALL NOT introduce `PACK_TEST_*`-style
-   env-var-gated registry tests; use a local registry like pack's existing
-   testhelpers, consistent with the pack-side testing strategy.
-4. Emit-mode is a Go package consumed by pack; ONCE the pack MVP is confirmed, the
-   deferred tests become required (the change is not "done" long-term without
-   them), but they are explicitly out of scope for the MVP milestone.
+1. THE emit-mode SHALL produce a correct plan for every Platform API this lifecycle
+   supports (0.7 through 0.15) by recording exactly the operations the exporter
+   performs for the negotiated Platform API (no per-version logic).
+2. THE finalized `io.buildpacks.lifecycle.metadata` (and the config env
+   `CNB_PLATFORM_API`) SHALL reflect the negotiated Platform API, as a normal export
+   would.
+
+### Requirement 8: Local, MVP validation (repeated cycles), tests follow
+
+**User Story:** As a maintainer, I want emit-mode + finalize validated locally with
+REPEATED rebuilds/rebases before investing in automated tests.
+
+#### Acceptance Criteria
+
+1. FOR the MVP, emit-mode + finalize SHALL be validated by driving the pack-side e2e
+   against a local registry (the two-build strategy), covering ≥2 rebuilds, ≥2
+   rebases, and a rebuild-after-rebase — NOT only the first cycle, and NOT by new Go
+   unit/integration tests initially.
+2. Automated unit + integration tests (emit plan serializer, the finalize authoring
+   from produced diffIDs, and an export-parity check) SHALL be added AFTER the pack
+   MVP is confirmed. They SHALL NOT introduce `PACK_TEST_*`-style env-var-gated
+   registry tests; use a local registry like pack's testhelpers.

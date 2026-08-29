@@ -1,5 +1,11 @@
 # Requirements: CNB BuildKit Gateway Frontend (`cnbfrontend`)
 
+> **SUPERSEDED / RETIRED.** The frontend approach is retired in favor of Option A
+> (build-then-finalize) — see `buildkit-native-export` (both repos) and the decision
+> record `cnb-buildkit-frontend/spike-eliminate-metadata-rewrite.md`. Under Option A
+> BuildKit builds+pushes a normal image and a lifecycle FINALIZE step authors the CNB
+> metadata; no gateway frontend is needed. This spec is kept for history + the spike.
+
 ## Introduction
 
 This spec documents the **CNB BuildKit gateway frontend** — the component that

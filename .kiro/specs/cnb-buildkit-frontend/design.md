@@ -1,5 +1,9 @@
 # Design: CNB BuildKit Gateway Frontend (`cnbfrontend`)
 
+> **SUPERSEDED / RETIRED.** Retired in favor of Option A (build-then-finalize) — see
+> `buildkit-native-export` (both repos) and `spike-eliminate-metadata-rewrite.md`.
+> Kept for history.
+
 ## Overview
 
 `cnbfrontend` is a BuildKit gateway frontend that assembles a CNB app image

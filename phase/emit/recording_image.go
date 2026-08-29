@@ -43,9 +43,20 @@ const RecorderDir = "buildkit"
 const (
 	PlanFileName   = "plan.json"
 	ConfigFileName = "config.json"
+	// BuildMetadataFileName is the file emit-mode writes carrying the serialized
+	// BuildMetadata (plan + emitted config labels). For Option A (build-then-
+	// finalize), the build phase sets this JSON as the BuildMetadataLabel on the
+	// produced image, and finalize consumes it. It is the single artifact the
+	// finalize step needs from the build (finalize reads produced diffIDs from the
+	// image itself, not from any tar).
+	BuildMetadataFileName = "build-metadata.json"
 	// LayersSubdir is the subdirectory (under <outputDir>/<RecorderDir>/) where the
 	// emitted layer tars are persisted so the consumer can read them after the
 	// export step (the exporter's own temp artifacts dir is cleaned up).
+	//
+	// NOTE (Option A): finalize does NOT need these tars (it reads produced diffIDs
+	// from the pushed image). Tar persistence is retained only for the SUPERSEDED
+	// frontend re-assembly path and may be removed once that path is gone.
 	LayersSubdir = "layers"
 )
 
@@ -288,6 +299,23 @@ func (r *RecordingImage) Save(_ ...string) error {
 	}
 	if err := writeJSON(filepath.Join(dir, ConfigFileName), r.config); err != nil {
 		return errors.Wrap(err, "emit: write config.json")
+	}
+
+	// Option A (build-then-finalize): also write the serialized BuildMetadata (the
+	// plan + emitted config labels) that the build phase sets as the
+	// BuildMetadataLabel on the produced image, and that finalize consumes. This is
+	// the single artifact the finalize step needs from the build. The plan here
+	// uses the ORIGINAL (non-persisted) layers so the intended diffIDs + reused
+	// flags are exactly what the exporter produced; TarPath is irrelevant to
+	// finalize.
+	bmPlan := Plan{
+		Schema:   Schema,
+		RunImage: PlanRunImage{Reference: r.runImageRef, TopLayer: topLayer},
+		Layers:   r.layers,
+	}
+	bm := NewBuildMetadata(bmPlan, r.config)
+	if err := writeJSON(filepath.Join(dir, BuildMetadataFileName), bm); err != nil {
+		return errors.Wrap(err, "emit: write build-metadata.json")
 	}
 	return nil
 }

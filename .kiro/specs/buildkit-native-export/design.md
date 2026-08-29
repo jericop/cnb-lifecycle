@@ -1,20 +1,96 @@
-# Design: Lifecycle BuildKit-Native Export Emit-Mode
+# Design: Lifecycle BuildKit-Native Export (emit-mode + finalize)
 
-## Overview
+## Overview (Option A — current design)
 
-Add an additive, opt-in export "emit-mode" to the lifecycle. Instead of the
-exporter assembling and pushing an `imgutil.Image`, emit-mode produces the
-buildpacks-specific outputs that a caller (pack) turns into a BuildKit-native image
-assembly:
+The lifecycle provides two additive, opt-in capabilities for the BuildKit-native
+backend:
 
-- an ordered **Layer Plan** (`plan.json`),
-- the final **Image Config** (`config.json`), and
-- for new layers, references to the ACTUAL layer tars the lifecycle built (under
-  `/layers`), with precomputed diffIDs.
+1. **Emit-mode** — the exporter computes the ordered **Layer Plan** (which layers,
+   order, new-vs-reused, intended diffID, identity, history, run-image boundary)
+   WITHOUT assembling or pushing an image. This plan is surfaced onto the built
+   image as the `io.buildpacks.buildkit.native.build-metadata` LABEL (a build-phase
+   artifact, distinct from the final CNB metadata label).
+2. **Finalize** — a library API (+ subcommand) that, given a built+pushed image
+   reference, reads the image's ACTUAL produced layer diffIDs plus the
+   `io.buildpacks.buildkit.native.build-metadata` label, and AUTHORS the correct
+   `io.buildpacks.lifecycle.metadata` (per-layer SHAs = produced diffIDs; RunImage
+   boundary), re-pushing ONLY the config + manifest (+ index).
 
-This spec is the LIFECYCLE half of Option C. The pack half
-(`jericop/cnb-pack@buildkit-native-export`) consumes this output. The emit contract
-below is the interface between them.
+The flow (Option A): BuildKit builds + pushes a normal image (runnable, not yet
+CNB-compliant) carrying the build-metadata label; then finalize (called by pack,
+like `phase.Rebaser`) authors the real metadata from the produced layers. No
+frontend, no per-layer re-extraction, no post-push LAYER changes.
+
+Decision record + rejected alternatives:
+`cnb-lifecycle/.kiro/specs/cnb-buildkit-frontend/spike-eliminate-metadata-rewrite.md`.
+
+### What changed from the earlier emit design (SUPERSEDED transport)
+
+The earlier design transported the plan/config as FILES (`plan.json` +
+`config.json`) plus PERSISTED layer tars under `<emit-dir>/buildkit/layers/`, for a
+frontend to re-assemble and pack to REWRITE metadata SHAs post-push. That file-based
+transport + tar persistence + the `io.buildpacks.native.layer-order` temp label are
+SUPERSEDED. The plan is now surfaced as the single
+`io.buildpacks.buildkit.native.build-metadata` LABEL, no tars are persisted, and
+metadata is AUTHORED by finalize (not patched). The RecordingImage plan-computation
+below is still used to COMPUTE the plan; only the transport + the post-step differ.
+
+## Finalize: author `io.buildpacks.lifecycle.metadata` from the produced image
+
+Inputs: a built+pushed image reference (single image or manifest list); read access
+to the registry (go-containerregistry, as rebase uses).
+
+Steps (per image; for a manifest list, per child then re-push the index):
+
+1. Read the image config → `RootFS.DiffIDs` (the PRODUCED diffIDs, in order) + the
+   existing labels.
+2. Read `io.buildpacks.buildkit.native.build-metadata` → the ordered plan (new-vs-
+   reused, identity, intended diffID, history, run-image reference/topLayer).
+3. Map plan entries → produced diffIDs positionally: the NEW layers occupy the
+   trailing `len(new layers)` positions of `RootFS.DiffIDs`, in plan order; reused
+   layers correspond to the run-image base diffIDs below the boundary. This yields,
+   for each CNB layer identity, its ACTUAL produced diffID.
+4. Build `files.LayersMetadata` with every per-layer `sha` set to the produced
+   diffID (`App[]`, `Launcher`, `Config`, `ProcessTypes`, each
+   `Buildpacks[].layers[<name>].sha`, `sbom`) and `RunImage.TopLayer`/`Reference`
+   from the plan. Author the other labels (`build.metadata`, `project.metadata`,
+   exec-env) from data carried in the build-metadata label.
+5. Set `io.buildpacks.lifecycle.metadata` (+ the other labels) on the config;
+   optionally KEEP the build-metadata label (durable, for self-healing) — do not add
+   or change layers.
+6. Re-push config + manifest (+ index). Tag-atomic; idempotent (re-running authors
+   identical metadata).
+
+Why this is authoring, not patching: the metadata is built FROM the produced
+diffIDs the first time, so there is no "emitted vs produced" mismatch to reconcile —
+the earlier design emitted metadata with the WRONG (pre-produce) SHAs and patched
+them; finalize never writes wrong SHAs.
+
+### Finalize is a library (consumed like Rebaser)
+
+The finalize logic lives in the lifecycle as an importable package (e.g.
+`phase/finalize` or similar) with a subcommand wrapper. Pack imports and calls it in
+`NativeBackend` after the push, the way `pkg/client/rebase.go` calls `phase.Rebaser`.
+The subcommand wrapper enables a standalone/self-healing use later. This keeps CNB
+metadata authorship in one place; pack does not duplicate it.
+
+## The build-metadata label
+
+`io.buildpacks.buildkit.native.build-metadata` (JSON, with a `schema` field) is the
+serialized ordered Layer Plan (see "Emit the ordered Layer Plan" below). It is the
+plan surfaced as a config LABEL rather than files. It carries everything finalize
+needs; new fields may be added without adding image layers. It is namespaced
+`io.buildpacks.buildkit.native.*` and is DISTINCT from the final
+`io.buildpacks.lifecycle.metadata` (the build phase never pre-writes a valid final
+label).
+
+---
+
+## (Retained) Emit-mode plan computation — how the ordered plan is produced
+
+The plan computation below is still used. Only the TRANSPORT (now a label, not
+files/tars) and the downstream step (now finalize authoring, not frontend
+re-assembly + rewrite) have changed per the Option A overview above.
 
 ## Where this plugs into the existing exporter
 

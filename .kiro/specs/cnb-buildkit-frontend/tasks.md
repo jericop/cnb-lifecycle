@@ -1,5 +1,9 @@
 # Tasks: CNB BuildKit Gateway Frontend (`cnbfrontend`)
 
+> **SUPERSEDED / RETIRED.** Retired in favor of Option A (build-then-finalize) — see
+> `buildkit-native-export` (both repos) and `spike-eliminate-metadata-rewrite.md`.
+> The frontend is no longer part of the target design; this is kept for history.
+
 AS-BUILT spec. The frontend is IMPLEMENTED and VALIDATED as part of the
 `buildkit-native-export` MVP. Tasks 1–7 reflect the completed implementation; the
 remaining tasks are follow-ups (not for the MVP).

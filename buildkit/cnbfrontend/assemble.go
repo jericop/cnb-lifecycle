@@ -62,28 +62,30 @@ func buildPlatform(ctx context.Context, c client.Client, cfg *buildConfig, p oci
 		return nil, nil, errors.Wrap(err, "solve assembled image")
 	}
 
-	// 4) Read the emitted image config + labels, overlay onto the run-image
-	//    config, and marshal for the exporter (this is what sets entrypoint/env/
-	//    workingdir + io.buildpacks.* labels on the final image).
+	// 4) Read the emitted image config, apply the RUNTIME config (entrypoint / cmd
+	//    / workingdir / env) onto the run-image base so the image is runnable, and
+	//    set the single BUILD-METADATA label. Option A (build-then-finalize): the
+	//    build phase MUST NOT write a valid final io.buildpacks.lifecycle.metadata
+	//    (its per-layer SHAs would be the INTENDED, pre-produce diffIDs, not the
+	//    diffIDs BuildKit assigns at export). Instead we carry the plan + emitted
+	//    labels in the io.buildpacks.buildkit.native.build-metadata label; a
+	//    lifecycle FINALIZE step authors the real CNB metadata from the produced
+	//    diffIDs afterward. See the buildkit-native-export design.
 	emitCfg, err := readEmitConfig(ctx, builtRef)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "read emit config")
 	}
 	img := *baseImg // copy the run-image config as the base
-	applyCNBConfig(&img, emitCfg)
+	applyRuntimeConfig(&img, emitCfg)
 
-	// Record the ORDERED old (emitted) diffIDs of the new layers, in the exact
-	// order they were added to the assembly, as a temporary label. The consumer
-	// (pack) reads this post-push and pairs it positionally with the assembled
-	// image's ACTUAL new-layer diffIDs to build an old->new map, then rewrites the
-	// io.buildpacks.lifecycle.metadata per-layer SHAs so the metadata is
-	// consistent with the image (required for the analyzer's previous-image
-	// restore AND buildpack-layer patching). The consumer removes this label after
-	// rewriting. See the buildkit-native-export design (metadata-SHA rewrite).
 	if img.Config.Labels == nil {
 		img.Config.Labels = map[string]string{}
 	}
-	img.Config.Labels[LayerOrderLabel] = emittedLayerOrderJSON(contract)
+	bmJSON, err := readBuildMetadataJSON(ctx, builtRef)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "read build-metadata")
+	}
+	img.Config.Labels[emit.BuildMetadataLabel] = bmJSON
 
 	imgConfig, err := marshalJSON(img)
 	if err != nil {
@@ -92,24 +94,21 @@ func buildPlatform(ctx context.Context, c client.Client, cfg *buildConfig, p oci
 	return assembledRef, imgConfig, nil
 }
 
-// LayerOrderLabel is the temporary label carrying the ordered emitted diffIDs of
-// the new (non-reused) layers. EXPORTED so the pack-side consumer reads the exact
-// same key. Removed by the consumer after the metadata-SHA rewrite.
-const LayerOrderLabel = "io.buildpacks.native.layer-order"
-
-// emittedLayerOrderJSON returns a JSON array of the emitted diffIDs of the plan's
-// NON-REUSED layers, in order — matching the order they are extracted onto the
-// assembly base.
-func emittedLayerOrderJSON(plan *emit.Plan) string {
-	var order []string
-	for _, l := range plan.Layers {
-		if l.Reused || l.TarPath == "" {
-			continue
-		}
-		order = append(order, l.DiffID)
+// readBuildMetadataJSON reads the serialized BuildMetadata the emit-mode exporter
+// wrote (<emitDir>/buildkit/build-metadata.json) from the built state, and returns
+// it as the JSON string to set as emit.BuildMetadataLabel. It validates the schema
+// via emit.ParseBuildMetadata but returns the ORIGINAL bytes (so the label value is
+// exactly what the lifecycle produced).
+func readBuildMetadataJSON(ctx context.Context, ref client.Reference) (string, error) {
+	p := path.Join(emitDir, emit.RecorderDir, emit.BuildMetadataFileName)
+	data, err := ref.ReadFile(ctx, client.ReadRequest{Filename: p})
+	if err != nil {
+		return "", errors.Wrapf(err, "read %s", p)
 	}
-	data, _ := json.Marshal(order)
-	return string(data)
+	if _, err := emit.ParseBuildMetadata(string(data)); err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // buildEmitState mirrors the pack LLB backend's build graph through the builder
@@ -378,17 +377,17 @@ func marshalJSON(v interface{}) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-// applyCNBConfig overlays the emitted CNB config + labels onto an image config.
-func applyCNBConfig(img *dockerspec.DockerOCIImage, ic *emit.ImageConfig) {
+// applyRuntimeConfig overlays ONLY the emitted RUNTIME config (entrypoint / cmd /
+// workingdir / env) onto the image config so the built image is runnable. It does
+// NOT copy the emitted CNB LABELS (io.buildpacks.lifecycle.metadata etc.): under
+// Option A those are AUTHORED by the finalize step from the produced diffIDs, and
+// the build phase must not pre-write a valid-looking final metadata label with the
+// intended (pre-produce) SHAs. The emitted labels are carried instead inside the
+// build-metadata label (via emit.BuildMetadata.Labels) for finalize to consume.
+func applyRuntimeConfig(img *dockerspec.DockerOCIImage, ic *emit.ImageConfig) {
 	img.Config.Entrypoint = ic.Entrypoint
 	img.Config.Cmd = ic.Cmd
 	img.Config.WorkingDir = ic.WorkingDir
-	if img.Config.Labels == nil {
-		img.Config.Labels = map[string]string{}
-	}
-	for k, v := range ic.Labels {
-		img.Config.Labels[k] = v
-	}
 	// Merge env: keep base env, then set/override CNB env keys.
 	img.Config.Env = mergeEnv(img.Config.Env, ic.Env)
 }
