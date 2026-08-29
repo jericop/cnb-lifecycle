@@ -71,11 +71,45 @@ func buildPlatform(ctx context.Context, c client.Client, cfg *buildConfig, p oci
 	}
 	img := *baseImg // copy the run-image config as the base
 	applyCNBConfig(&img, emitCfg)
+
+	// Record the ORDERED old (emitted) diffIDs of the new layers, in the exact
+	// order they were added to the assembly, as a temporary label. The consumer
+	// (pack) reads this post-push and pairs it positionally with the assembled
+	// image's ACTUAL new-layer diffIDs to build an old->new map, then rewrites the
+	// io.buildpacks.lifecycle.metadata per-layer SHAs so the metadata is
+	// consistent with the image (required for the analyzer's previous-image
+	// restore AND buildpack-layer patching). The consumer removes this label after
+	// rewriting. See the buildkit-native-export design (metadata-SHA rewrite).
+	if img.Config.Labels == nil {
+		img.Config.Labels = map[string]string{}
+	}
+	img.Config.Labels[LayerOrderLabel] = emittedLayerOrderJSON(contract)
+
 	imgConfig, err := marshalJSON(img)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "marshal image config")
 	}
 	return assembledRef, imgConfig, nil
+}
+
+// LayerOrderLabel is the temporary label carrying the ordered emitted diffIDs of
+// the new (non-reused) layers. EXPORTED so the pack-side consumer reads the exact
+// same key. Removed by the consumer after the metadata-SHA rewrite.
+const LayerOrderLabel = "io.buildpacks.native.layer-order"
+
+// emittedLayerOrderJSON returns a JSON array of the emitted diffIDs of the plan's
+// NON-REUSED layers, in order — matching the order they are extracted onto the
+// assembly base.
+func emittedLayerOrderJSON(plan *emit.Plan) string {
+	var order []string
+	for _, l := range plan.Layers {
+		if l.Reused || l.TarPath == "" {
+			continue
+		}
+		order = append(order, l.DiffID)
+	}
+	data, _ := json.Marshal(order)
+	return string(data)
 }
 
 // buildEmitState mirrors the pack LLB backend's build graph through the builder
@@ -243,24 +277,39 @@ func assembleState(ctx context.Context, c client.Client, cfg *buildConfig, p oci
 
 	state := llb.Image(runRef, llb.Platform(p))
 
-	// Copy each NEW layer's contents from the built state onto the run-image base.
-	// The emitted tar paths point at the built layer tars under /layers; but for a
-	// FROM-run-image assembly we copy the LAYER CONTENTS (the directories the
-	// lifecycle placed under /layers and /workspace), letting BuildKit snapshot
-	// them into new layers. Reused layers are already present in the base.
+	// Assemble ONE LAYER PER EMITTED CNB LAYER, in plan order, by extracting each
+	// emitted layer tar onto the run-image base with its own RUN step. This gives
+	// the assembled image the SAME layer boundaries + count as the emit plan (so
+	// each buildpack layer is individually addressable), which is required for:
+	//   - the analyzer's previous-image restore on rebuilds, and
+	//   - buildpack-contributed-layer patching (jab/buildpack-layer-patching).
+	// BuildKit recomputes each layer's diffID from the extracted filesystem; the
+	// caller rewrites the io.buildpacks.lifecycle.metadata per-layer SHAs to the
+	// actual produced diffIDs so the metadata stays consistent with the image.
 	//
-	// NOTE (MVP): we copy the well-known CNB launch content — /layers (buildpack
-	// launch layers, launcher, config, process-types) and /workspace (app) — from
-	// the built state. This mirrors cnbp's export.go. A future refinement can copy
-	// per-layer paths from the plan for finer cache granularity.
-	state = state.File(
-		llb.Copy(built, layersDir, layersDir, &llb.CopyInfo{CreateDestPath: true}),
-		llb.WithCustomName("assemble: copy /layers"),
-	)
-	state = state.File(
-		llb.Copy(built, appDir, appDir, &llb.CopyInfo{CreateDestPath: true, CopyDirContentsOnly: false}),
-		llb.WithCustomName("assemble: copy /workspace"),
-	)
+	// The emitted tars live in the built state at plan layer TarPath. We mount the
+	// built state read-only at /emit-tars and `tar -xf` each in order. Reused
+	// (run-image) layers are already present in the base and are skipped here.
+	//
+	// MVP ASSUMPTION: the run image provides /bin/sh and tar (true for the
+	// ubuntu-noble run image). A future hardening can extract using tooling from
+	// the builder image (mounted in) so the run image needs no shell/tar.
+	tarsMount := llb.AddMount("/emit-tars", built, llb.Readonly)
+	for _, layer := range plan.Layers {
+		if layer.Reused || layer.TarPath == "" {
+			continue
+		}
+		// layer.TarPath is recorded RELATIVE to the emit output dir root (e.g.
+		// "buildkit/layers/000-....tar"); the emit output dir is emitDir in the
+		// built state, mounted at /emit-tars. So the tar is at
+		// /emit-tars/<emitDir>/<TarPath>.
+		src := path.Join("/emit-tars", emitDir, layer.TarPath)
+		state = state.Run(
+			llb.Args([]string{"/bin/sh", "-c", fmt.Sprintf("tar -xf %q -C /", src)}),
+			llb.WithCustomNamef("assemble layer: %s", layer.ID),
+			tarsMount,
+		).Root()
+	}
 	return state, baseImg, nil
 }
 

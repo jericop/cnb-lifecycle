@@ -20,8 +20,10 @@ package emit
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/buildpacks/imgutil"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -41,6 +43,10 @@ const RecorderDir = "buildkit"
 const (
 	PlanFileName   = "plan.json"
 	ConfigFileName = "config.json"
+	// LayersSubdir is the subdirectory (under <outputDir>/<RecorderDir>/) where the
+	// emitted layer tars are persisted so the consumer can read them after the
+	// export step (the exporter's own temp artifacts dir is cleaned up).
+	LayersSubdir = "layers"
 )
 
 // LayerOp is one recorded layer operation, in the order the exporter emitted it.
@@ -237,19 +243,46 @@ func (r *RecordingImage) Save(_ ...string) error {
 		return errors.Wrap(err, "emit: get run image top layer")
 	}
 
+	dir := filepath.Join(r.outputDir, RecorderDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return errors.Wrapf(err, "emit: create output dir %s", dir)
+	}
+
+	// Persist the emitted layer tars into the output dir. The exporter builds them
+	// under a temp artifacts dir that is removed after Export() returns, so the
+	// consumer (which reads them from the build filesystem AFTER the export step)
+	// would not find them at their original path. Copy each into
+	// <outputDir>/<RecorderDir>/layers/ and rewrite TarPath to that stable
+	// location so the consumer can add each layer by its own tar.
+	layersOut := filepath.Join(dir, LayersSubdir)
+	if err := os.MkdirAll(layersOut, 0755); err != nil {
+		return errors.Wrapf(err, "emit: create layers dir %s", layersOut)
+	}
+	persisted := make([]LayerOp, len(r.layers))
+	for i, l := range r.layers {
+		persisted[i] = l
+		if l.Reused || l.TarPath == "" {
+			continue
+		}
+		dstName := fmt.Sprintf("%03d-%s.tar", i, sanitizeLayerName(l.ID))
+		dstPath := filepath.Join(layersOut, dstName)
+		if err := copyFile(l.TarPath, dstPath); err != nil {
+			return errors.Wrapf(err, "emit: persist layer tar %s", l.TarPath)
+		}
+		// Record a path relative to the output dir root so the consumer can locate
+		// it deterministically regardless of absolute mount point.
+		persisted[i].TarPath = filepath.Join(RecorderDir, LayersSubdir, dstName)
+	}
+
 	plan := Plan{
 		Schema: Schema,
 		RunImage: PlanRunImage{
 			Reference: r.runImageRef,
 			TopLayer:  topLayer,
 		},
-		Layers: r.layers,
+		Layers: persisted,
 	}
 
-	dir := filepath.Join(r.outputDir, RecorderDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return errors.Wrapf(err, "emit: create output dir %s", dir)
-	}
 	if err := writeJSON(filepath.Join(dir, PlanFileName), plan); err != nil {
 		return errors.Wrap(err, "emit: write plan.json")
 	}
@@ -262,6 +295,34 @@ func (r *RecordingImage) Save(_ ...string) error {
 // SaveAs behaves like Save for emit-mode (there is no distinct name to save as).
 func (r *RecordingImage) SaveAs(_ string, additionalNames ...string) error {
 	return r.Save(additionalNames...)
+}
+
+// sanitizeLayerName turns a layer id/history string into a filesystem-safe token.
+func sanitizeLayerName(id string) string {
+	repl := strings.NewReplacer("/", "_", ":", "_", " ", "_", "'", "", ",", "", "@", "_")
+	s := repl.Replace(id)
+	if len(s) > 80 {
+		s = s[:80]
+	}
+	return s
+}
+
+// copyFile copies src to dst (used to persist emitted layer tars).
+func copyFile(src, dst string) error {
+	in, err := os.Open(filepath.Clean(src))
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(filepath.Clean(dst))
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 func writeJSON(path string, v interface{}) error {
