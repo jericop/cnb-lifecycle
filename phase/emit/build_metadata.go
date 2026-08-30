@@ -5,21 +5,23 @@ import (
 	"fmt"
 )
 
-// BuildMetadataLabel is the image LABEL under which the BuildKit-native BUILD
-// phase surfaces the ordered layer plan + emitted config labels for the FINALIZE
-// step to consume.
+// BuildMetadataLabel is the image LABEL under which the BUILD phase surfaces the
+// ordered layer plan + emitted config labels for the apply-image-metadata step to
+// consume.
 //
-// It is intentionally NAMESPACED under io.buildpacks.buildkit.native.* and is
-// DISTINCT from the final io.buildpacks.lifecycle.metadata label: the build phase
-// must NOT pre-write a valid final CNB metadata label, because the per-layer SHAs
-// it would contain are the INTENDED (pre-produce) diffIDs, not the diffIDs BuildKit
-// actually assigns at export. Finalize reads this label + the image's ACTUAL
-// produced diffIDs and AUTHORS the correct io.buildpacks.lifecycle.metadata.
+// It is builder-AGNOSTIC (no "buildkit" in the name): any external builder
+// (BuildKit today, buildah-podman in the future) produces an image carrying this
+// label, and a single apply step consumes it. It is DISTINCT from the final
+// io.buildpacks.lifecycle.metadata label: the build phase must NOT pre-write a
+// valid final CNB metadata label, because the per-layer SHAs it would contain are
+// the INTENDED (pre-produce) diffIDs, not the diffIDs the builder actually assigns
+// at export. The apply step reads this label + the image's ACTUAL produced diffIDs
+// and AUTHORS the correct io.buildpacks.lifecycle.metadata.
 //
 // The label is a build-phase artifact and is only PARTIALLY valid on its own
-// (its per-layer diffIDs are the intended ones). Finalize reconciles it against
-// the produced image.
-const BuildMetadataLabel = "io.buildpacks.buildkit.native.build-metadata"
+// (its per-layer diffIDs are the intended ones). The apply step reconciles it
+// against the produced image.
+const BuildMetadataLabel = "io.buildpacks.lifecycle.prepared-metadata"
 
 // BuildMetadata is the payload of BuildMetadataLabel. It carries everything the
 // finalize step needs to author correct CNB metadata WITHOUT re-reading any layer

@@ -40,7 +40,7 @@ type finalizeCmd struct {
 // DefineFlags defines the flags that are considered valid and reads their values (if provided).
 func (f *finalizeCmd) DefineFlags() {
 	cli.FlagInsecureRegistries(&f.InsecureRegistries)
-	cli.FlagKeepBuildMetadataLabel(&f.keepBuildMetadataLabel)
+	cli.FlagKeepPreparedMetadataLabel(&f.keepBuildMetadataLabel)
 	cli.FlagLogLevel(&f.LogLevel)
 	cli.FlagNoColor(&f.NoColor)
 }

@@ -195,13 +195,12 @@ func DeprecatedFlagRunImage(deprecatedRunImage *string) {
 	flagSet.StringVar(deprecatedRunImage, "image", "", "[deprecated] reference to run image")
 }
 
-func FlagPullRunImage(pullRunImage *bool) {
-	flagSet.BoolVar(pullRunImage, "pull-run-image", *pullRunImage, "pull run image from registry into layout directory (for layout mode in buildkit)")
-}
 
-// FlagKeepBuildMetadataLabel controls whether the finalize step leaves the
-// io.buildpacks.buildkit.native.build-metadata label on the finalized image
-// (durable, enabling later self-healing re-finalization) instead of removing it.
-func FlagKeepBuildMetadataLabel(keep *bool) {
-	flagSet.BoolVar(keep, "keep-build-metadata-label", *keep, "keep the buildkit-native build-metadata label on the finalized image (enables later self-healing re-finalize)")
+
+// FlagKeepPreparedMetadataLabel controls whether the apply-image-metadata step
+// leaves the io.buildpacks.lifecycle.prepared-metadata label on the finalized
+// image (durable, enabling later self-healing re-application) instead of removing
+// it.
+func FlagKeepPreparedMetadataLabel(keep *bool) {
+	flagSet.BoolVar(keep, "keep-prepared-metadata-label", *keep, "keep the prepared-metadata label on the finalized image (enables later self-healing re-apply)")
 }
