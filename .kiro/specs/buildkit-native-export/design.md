@@ -12,9 +12,19 @@ backend:
    artifact, distinct from the final CNB metadata label).
 2. **Finalize** — a library API (+ subcommand) that, given a built+pushed image
    reference, reads the image's ACTUAL produced layer diffIDs plus the
-   `io.buildpacks.buildkit.native.build-metadata` label, and AUTHORS the correct
+   `io.buildpacks.lifecycle.prepared-metadata` label, and AUTHORS the correct
    `io.buildpacks.lifecycle.metadata` (per-layer SHAs = produced diffIDs; RunImage
    boundary), re-pushing ONLY the config + manifest (+ index).
+
+> NOTE (as-implemented): the build-phase label is
+> `io.buildpacks.lifecycle.prepared-metadata` (builder-agnostic), NOT the spike-era
+> `io.buildpacks.buildkit.native.build-metadata` used in places below; and the
+> keep-label flag is `-keep-prepared-metadata-label`. The as-built assembly is
+> pack-side `llb.Copy` from emitted layer SOURCE REFS — there is NO custom BuildKit
+> frontend and NO persisted layer tars. The "AS-BUILT (MVP)" section further down
+> describes an intermediate spike (frontend + host-side SHA rewrite +
+> `io.buildpacks.native.layer-order`) that was SUPERSEDED; a correction banner marks
+> it.
 
 The flow (Option A): BuildKit builds + pushes a normal image (runnable, not yet
 CNB-compliant) carrying the build-metadata label; then finalize (called by pack,
@@ -380,10 +390,23 @@ production buildpacks; no additional effort required for the recorder.
 - **PATH base value:** emit the pre-prepend run-image PATH as a separate field only
   if a real consumer needs it (see PATH decision above).
 
-## AS-BUILT (MVP, validated) — emit-mode + frontend, and where the SHA rewrite lives
+## AS-BUILT (MVP) — SUPERSEDED intermediate spike (frontend + host-side SHA rewrite)
 
-The MVP is implemented and validated end-to-end. Two things landed beyond the
-emit-mode recorder described above:
+> **SUPERSEDED — do not treat this section as the current as-built.** This describes
+> an INTERMEDIATE spike that used a CNB BuildKit gateway frontend
+> (`buildkit/cnbfrontend`, `cmd/cnb-frontend`) that re-extracted layer tars, emit-mode
+> that PERSISTED layer tars under `<emit-dir>/buildkit/layers/`, a temp
+> `io.buildpacks.native.layer-order` label, and a pack-side host-side metadata-SHA
+> REWRITE after push. ALL of that has been REMOVED. The CURRENT as-built (see the
+> Option A overview + the "Layer SOURCE REFS" section above) is: emit-mode records
+> per-layer SOURCE REFS (no tar persistence); pack assembles `FROM run-image` via
+> in-process `llb.Copy` (no frontend); and the lifecycle `phase/finalize` library
+> AUTHORS `io.buildpacks.lifecycle.metadata` from the produced diffIDs post-push (no
+> SHA rewrite). The build-phase label is `io.buildpacks.lifecycle.prepared-metadata`.
+> The text below is retained only as a record of the spike.
+
+The intermediate spike landed two things beyond the emit-mode recorder described
+above (both now retired):
 
 1. **The assembly mechanism is a CNB BuildKit gateway FRONTEND, not pack-side
    pure-LLB.** A plain `client.Solve` with a raw `llb.State` cannot set the output

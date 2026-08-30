@@ -16,12 +16,20 @@ metadata authorship in the lifecycle, requires NO frontend and NO post-push laye
 changes, and produces correct metadata authored against reality (not patched from a
 stale emitted label).
 
+> NOTE (as-implemented): the build-phase label is
+> `io.buildpacks.lifecycle.prepared-metadata` (builder-agnostic), NOT the spike-era
+> `io.buildpacks.buildkit.native.build-metadata`; and the keep-label flag is
+> `-keep-prepared-metadata-label`. This spec was written during the spike and still
+> uses the older label name in places below — read it as the current name. The
+> as-built assembly is pack-side `llb.Copy` from emitted layer SOURCE REFS (no
+> frontend, no persisted layer tars); the finalize step AUTHORS the metadata.
+
 The lifecycle provides two things:
 
 1. **Emit-mode (the ordered plan).** The exporter, run in emit-mode, computes the
    ordered layer plan (which layers, order, new-vs-reused, intended diffIDs, history,
    layer identity, run-image boundary). This plan is surfaced onto the built image as
-   the `io.buildpacks.buildkit.native.build-metadata` LABEL (a build-phase artifact,
+   the `io.buildpacks.lifecycle.prepared-metadata` LABEL (a build-phase artifact,
    distinct from the final CNB metadata label).
 2. **Finalize (author the real metadata).** A library API (+ subcommand) that, given
    a built image ref and the build-metadata label, reads the image's ACTUAL produced
