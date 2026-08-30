@@ -4,9 +4,23 @@ inclusion: manual
 
 # Layer Order and Rebase Compatibility
 
+> **STATUS — invariants current; assembly framing historical.** The layer-order
+> and rebase invariants documented here are timeless and still hold. However, the
+> framing around a `-export-mode layers` contract and a generated Dockerfile with
+> `COPY --from=lifecycle-stage /output/layers/NN/ /` reflects an EXPLORED path that
+> was not chosen. In the implemented design, pack's in-process BuildFunc assembles
+> the image via `llb.Copy` of each emitted CNB layer source (one `llb.Copy` per
+> layer, in order), and the lifecycle `phase/finalize` library authors
+> `io.buildpacks.lifecycle.metadata` from the produced diffIDs post-push. Read the
+> Dockerfile/`-export-mode layers` examples below as illustrative of the ordering
+> model, not the current mechanism.
+
 ## Context
 
-The `-export-mode layers` feature produces decomposed layer output that an external tool (BuildKit, Buildah, Podman) assembles into the final OCI image. For the resulting image to be functionally equivalent to what the lifecycle normally produces, two invariants must hold:
+An external assembly step (in the implemented design, pack's `llb.Copy`-based
+BuildFunc) stacks the lifecycle-produced layers on top of the run image. For the
+resulting image to be functionally equivalent to what the lifecycle normally
+produces, two invariants must hold:
 
 1. **Layer order must be correct** — layers must be assembled in the same order the lifecycle would apply them
 2. **Rebase must work identically** — `pack rebase` must be able to swap run image layers without affecting buildpack/app layers

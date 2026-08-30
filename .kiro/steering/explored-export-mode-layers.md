@@ -8,7 +8,12 @@ inclusion: manual
 
 This document preserves a design that was explored but **not chosen** for the initial implementation of eliminating intermediate image tags in BuildKit multi-arch builds.
 
-**Why deferred:** We determined that the existing OCI layout export mode (`-layout -layout-dir`) already provides everything needed to eliminate intermediate tags, without requiring a new lifecycle export mode. The lifecycle exporter already has all the information at export time and produces a complete, spec-compliant OCI image. The custom contract's main advantage — per-layer BuildKit caching — provides only marginal benefit because:
+**Why deferred:** This custom `-export-mode layers` contract was explored but not
+chosen. The implementation instead converged on a build-then-finalize design: the
+single `buildkit` backend builds and pushes natively in BuildKit, and a lifecycle
+`phase/finalize` library authors the CNB metadata post-push (see
+`buildkit-changes.md`). The custom contract's main advantage — per-layer BuildKit
+caching — provides only marginal benefit because:
 
 1. Buildpacks always re-run when source changes (COPY invalidates downstream)
 2. The lifecycle's own `--mount=type=cache` handles dependency caching
@@ -120,7 +125,7 @@ New files:
 - FR-4: Layer output format (expanded directories, numbered, human-readable names, diff IDs)
 - FR-5: Image config in manifest.json (all CNB labels, entrypoint, user, workdir, env, exposed ports)
 - FR-6: Backward compatibility (unchanged behavior without the flag)
-- FR-7: Integration with `-skip-chown`, `-pull-run-image`, `-cache-dir`
+- FR-7: Integration with `-skip-chown`, `-cache-dir`
 
 ### Tasks (Original)
 
@@ -143,6 +148,13 @@ New files:
 
 ## Relationship to the Chosen Approach
 
-The chosen approach (OCI layout + pack pushes manifest list) is documented in the cnb-pack spec `oci-layout-tag-elimination`. It requires no lifecycle changes beyond the already-implemented `-skip-chown` and `-pull-run-image` flags.
+The chosen approach is the single builder-agnostic `buildkit` backend
+(build-then-finalize): BuildKit builds and pushes the image natively, and the
+lifecycle `phase/finalize` library authors the CNB metadata from the produced
+diffIDs post-push. It requires no lifecycle changes beyond the already-implemented
+`-skip-chown` flag plus the emit-mode/finalize additions (see `buildkit-changes.md`).
+The earlier OCI-layout path and its `-pull-run-image` flag were removed.
 
-If pre-copy buildpack caching is pursued later, revisit this document — the decomposed contract is the natural foundation for reassembling layers produced across multiple build stages.
+If pre-copy buildpack caching is pursued later, revisit this document — the
+decomposed contract is the natural foundation for reassembling layers produced
+across multiple build stages.
