@@ -6,6 +6,12 @@ on:
       - skip-chown
       - buildkit-multi-arch-support
       - buildkit-native-export
+    tags:
+      # Semver-style tags on the buildkit-native-export line publish a pinned,
+      # immutable lifecycle image (e.g. buildkit-native-export-v0.1.0 ->
+      # jericop/lifecycle:buildkit-native-export-v0.1.0) that pack + the builder
+      # can reference by a stable tag instead of a moving branch tag.
+      - 'buildkit-native-export-v*'
   workflow_dispatch:
 
 permissions:
@@ -35,17 +41,33 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Publish images
         run: |
-          # Derive the image tag from the branch so each feature branch publishes
-          # its own tag and never clobbers another:
+          # Derive the image tag from the git ref.
+          #
+          # Tag push (refs/tags/...): publish an immutable, pinned image whose
+          # tag matches the git tag verbatim, e.g.
+          #   buildkit-native-export-v0.1.0 -> jericop/lifecycle:buildkit-native-export-v0.1.0
+          # pack's go.mod replace + the builder's [lifecycle].uri pin to this tag.
+          #
+          # Branch push (refs/heads/...): publish a moving per-branch tag so each
+          # feature branch publishes its own tag and never clobbers another:
           #   skip-chown                 -> jericop/lifecycle:skip-chown-poc
           #   buildkit-multi-arch-support-> jericop/lifecycle:buildkit-multi-arch-support
-          BRANCH="${GITHUB_REF#refs/heads/}"
-          if [ "${BRANCH}" = "skip-chown" ]; then
-            LIFECYCLE_IMAGE_TAG=skip-chown-poc
-          else
-            LIFECYCLE_IMAGE_TAG="${BRANCH}"
-          fi
-          echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (branch ${BRANCH})"
+          #   buildkit-native-export     -> jericop/lifecycle:buildkit-native-export
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              LIFECYCLE_IMAGE_TAG="${GITHUB_REF#refs/tags/}"
+              echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (git tag)"
+              ;;
+            *)
+              BRANCH="${GITHUB_REF#refs/heads/}"
+              if [ "${BRANCH}" = "skip-chown" ]; then
+                LIFECYCLE_IMAGE_TAG=skip-chown-poc
+              else
+                LIFECYCLE_IMAGE_TAG="${BRANCH}"
+              fi
+              echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (branch ${BRANCH})"
+              ;;
+          esac
 
           LINUX_AMD64_SHA=$(go run ./tools/image/main.go -lifecyclePath ./out/lifecycle-v*+linux.x86-64.tgz -tag jericop/lifecycle:${LIFECYCLE_IMAGE_TAG}-linux-x86-64 | awk '{print $NF}')
           echo "LINUX_AMD64_SHA: $LINUX_AMD64_SHA"
