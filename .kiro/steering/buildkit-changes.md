@@ -104,8 +104,8 @@ replaces the spike-era `io.buildpacks.buildkit.native.build-metadata` and
 
 `cmd/lifecycle/cli/flags.go` provides `FlagKeepPreparedMetadataLabel()`
 (`-keep-prepared-metadata-label`) so finalize can retain the prepared-metadata
-label for a future opt-in self-heal path in pack (`--buildkit-fix-image-metadata`,
-not yet implemented).
+label for pack's opt-in self-heal path (`pack build --fix-image-metadata` /
+`pack image-metadata fix`).
 
 ## Published Artifacts
 
