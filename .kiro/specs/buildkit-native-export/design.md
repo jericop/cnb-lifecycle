@@ -532,6 +532,47 @@ what preserves the no-egress property that motivates Option C.
   (e.g. run-image metadata for >= 0.12); emit-mode must match the same API-gated
   behavior.
 
+## Verification status (for the RFC — what was tested and how)
+
+The buildkit-native path was validated locally against the real `pack` binary +
+patched lifecycle image, publishing to a local registry. Confirmed working:
+
+- **Cold build / rebuild / rebase** across sample apps (go/mod, python/poetry,
+  nodejs/npm, java/maven, java/java-node), single- and multi-arch (amd64+arm64):
+  finalized images carry a valid `io.buildpacks.lifecycle.metadata`, per-layer SHAs
+  are actual produced diffIDs, and rebuild/rebase behave correctly.
+- **Remote BuildKit registry cache** (`--buildkit-cache-to` / `--buildkit-cache-from
+  type=registry`): a fresh (pruned) builder imports the exported cache.
+- **Custom run image** (non-default `--run-image`) and **rebase onto a different
+  run image**: `runImage.reference`/`topLayer` are authored correctly; app/buildpack
+  layers are preserved across rebase (only the run base changes).
+
+### App slices — verified at the seams (NOT end-to-end), by design
+
+App slices (`[[slices]]`) come from a BUILDPACK's `launch.toml`, collected by the
+builder and consumed by the exporter's `addAppLayers` → `SliceLayers`. The default
+paketo buildpacks used in the sample matrix do NOT emit app slices (e.g. the npm
+buildpack puts `node_modules` in a BUILDPACK layer, not an app slice; a build shows
+"Added 1/1 app layer(s)"). So there is no off-the-shelf sample that exercises the
+multi-app-slice path with the current builder.
+
+Slice correctness is therefore verified by UNIT TESTS at the two seams that the
+buildkit-native path introduces, which together cover producer→consumer:
+
+- **Producer seam (lifecycle):** `layers/slices_test.go` asserts `SliceLayers`
+  records each slice layer's `Source` — `Dir` = app dir, `Include` = the EXACT
+  relative paths that slice contains (files land in exactly one layer), plus the
+  normalized uid/gid. This is the source-ref that emit-mode surfaces.
+- **Consumer seam (pack):** `internal/build/multiplatform/native_buildfunc_slices_internal_test.go`
+  asserts `copyFromSource` turns a slice `LayerOp` (with `Source.Include`) into an
+  `llb.Copy` whose `IncludePatterns` equal that Include list, with
+  `dirCopyContents=true` and chown to the slice uid/gid.
+
+FOLLOW-UP (tracked): a full end-to-end slice build would require a custom buildpack
+that writes `[[slices]]` to its `launch.toml`. That is the only remaining slice
+coverage gap and is called out here for the RFC. The two seam tests exercise the
+actual fork code that implements slicing for the buildkit-native path.
+
 ## Testing (local, MVP)
 
 Run emit-mode against a real `/layers` produced by a build and compare the emitted
