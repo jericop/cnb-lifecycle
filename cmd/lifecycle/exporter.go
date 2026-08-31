@@ -29,6 +29,7 @@ import (
 	"github.com/buildpacks/lifecycle/image"
 	"github.com/buildpacks/lifecycle/layers"
 	"github.com/buildpacks/lifecycle/phase"
+	"github.com/buildpacks/lifecycle/phase/emit"
 	"github.com/buildpacks/lifecycle/platform"
 	"github.com/buildpacks/lifecycle/platform/files"
 	"github.com/buildpacks/lifecycle/priv"
@@ -61,6 +62,7 @@ func (e *exportCmd) DefineFlags() {
 	if e.PlatformAPI.AtLeast("0.11") {
 		cli.FlagLauncherSBOMDir(&e.LauncherSBOMDir)
 	}
+	cli.FlagEmitExportPlan(&e.EmitExportPlan)
 	cli.FlagAnalyzedPath(&e.AnalyzedPath)
 	cli.FlagAppDir(&e.AppDir)
 	cli.FlagCacheDir(&e.CacheDir)
@@ -78,6 +80,7 @@ func (e *exportCmd) DefineFlags() {
 	cli.FlagReportPath(&e.ReportPath)
 	cli.FlagRunImage(&e.RunImageRef) // FIXME: this flag isn't valid on Platform 0.7 and later
 	cli.FlagUID(&e.UID)
+	cli.FlagSkipChown(&e.SkipChown)
 	cli.FlagUseDaemon(&e.UseDaemon)
 
 	// deprecated
@@ -124,8 +127,10 @@ func (e *exportCmd) Privileges() error {
 			return cmd.FailErr(err, "initialize docker client")
 		}
 	}
-	if err = priv.EnsureOwner(e.UID, e.GID, e.CacheDir, e.LaunchCacheDir); err != nil {
+	if !e.SkipChown {
+		if err = priv.EnsureOwner(e.UID, e.GID, e.CacheDir, e.LaunchCacheDir); err != nil {
 		return cmd.FailErr(err, "chown volumes")
+	}
 	}
 	if err = priv.RunAs(e.UID, e.GID); err != nil {
 		return cmd.FailErr(err, fmt.Sprintf("exec as user %d:%d", e.UID, e.GID))
@@ -208,6 +213,18 @@ func (e *exportCmd) export(group buildpack.Group, cacheStore phase.Cache, analyz
 	}
 	if err != nil {
 		return err
+	}
+
+	// EXPERIMENTAL: BuildKit-native emit-mode. When -emit-export-plan is set, wrap
+	// the run-image-backed app image in a RecordingImage so the exporter's flow is
+	// unchanged (it still only calls imgutil.Image methods), but the operations are
+	// RECORDED and, on Save, written as the emit contract (buildkit/plan.json +
+	// config.json) instead of assembling/pushing an image. Reads (TopLayer, Env,
+	// Labels) forward to the wrapped run-image-backed image. See
+	// phase/emit and .kiro/specs/buildkit-native-export.
+	if e.EmitExportPlan != "" {
+		cmd.DefaultLogger.Infof("Emit-mode: recording export plan to %s (no image will be pushed)", e.EmitExportPlan)
+		appImage = emit.NewRecordingImage(appImage, runImageID, e.EmitExportPlan)
 	}
 
 	runImageForExport, err := platform.GetRunImageForExport(e.Inputs())

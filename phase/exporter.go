@@ -22,6 +22,7 @@ import (
 	"github.com/buildpacks/lifecycle/launch"
 	"github.com/buildpacks/lifecycle/layers"
 	"github.com/buildpacks/lifecycle/log"
+	"github.com/buildpacks/lifecycle/phase/emit"
 	"github.com/buildpacks/lifecycle/platform"
 	"github.com/buildpacks/lifecycle/platform/files"
 )
@@ -472,6 +473,7 @@ func (e *Exporter) addAppLayers(opts ExportOptions, slices []layers.Slice, meta 
 			err = opts.WorkingImage.ReuseLayerWithHistory(slice.Digest, slice.History)
 			numberOfReusedLayers++
 		} else {
+			recordLayerSource(opts.WorkingImage, slice)
 			err = opts.WorkingImage.AddLayerWithDiffIDAndHistory(slice.TarPath, slice.Digest, slice.History)
 		}
 		if err != nil {
@@ -612,10 +614,23 @@ func (e *Exporter) launcherConfig(opts ExportOptions, buildMD *files.BuildMetada
 }
 
 func (e *Exporter) addOrReuseBuildpackLayer(image imgutil.Image, layer layers.Layer, previousSHA, createdBy string) (string, error) {
+	// Preserve the filesystem Source recorded by the CALLER (which built this layer
+	// from the real buildpack layer dir). The re-derivation below passes
+	// layer.TarPath as DirLayer's fromDir, which is only valid because writeLayer
+	// returns the cached layer for an already-built tar — but on that cache-hit path
+	// fromDir is the tar path, NOT a real source dir, so we must NOT let it overwrite
+	// the correct Source. Restore the incoming Source after re-deriving.
+	incomingSource := layer.Source
 	layer, err := e.LayerFactory.DirLayer(layer.ID, layer.TarPath, createdBy)
 	if err != nil {
 		return "", errors.Wrapf(err, "creating layer '%s'", layer.ID)
 	}
+	// Restore the caller's Source UNCONDITIONALLY. The re-derivation above passes
+	// layer.TarPath as fromDir, so the fresh layer's Source.Dir is the (bogus) tar
+	// path; overwrite it with the incoming Source (which is the real dir, or nil for
+	// SYNTHESIZED layers like process-types that must have NO source so the consumer
+	// uses the small-tree fallback).
+	layer.Source = incomingSource
 	if layer.Digest == previousSHA {
 		e.Logger.Infof("Reusing layer '%s'\n", layer.ID)
 		e.Logger.Debugf("Layer '%s' SHA: %s\n", layer.ID, layer.Digest)
@@ -623,11 +638,37 @@ func (e *Exporter) addOrReuseBuildpackLayer(image imgutil.Image, layer layers.La
 	}
 	e.Logger.Infof("Adding layer '%s'\n", layer.ID)
 	e.Logger.Debugf("Layer '%s' SHA: %s\n", layer.ID, layer.Digest)
+	recordLayerSource(image, layer)
 	return layer.Digest, image.AddLayerWithDiffIDAndHistory(layer.TarPath, layer.Digest, layer.History)
 }
 
 func (e *Exporter) addExtensionLayer(image imgutil.Image, layer layers.Layer) (string, error) {
+	recordLayerSource(image, layer)
 	return layer.Digest, image.AddLayerWithDiffIDAndHistory(layer.TarPath, layer.Digest, layer.History)
+}
+
+// recordLayerSource attaches a layer's filesystem Source to the WorkingImage when
+// it supports it (emit-mode's RecordingImage). This is what lets the BuildKit-native
+// consumer assemble the layer with a native copy instead of extracting the tar. It
+// is a NO-OP for any other image type (normal export path unaffected). Keyed by
+// TarPath, which is what the consumer matches against the recorded LayerOp.
+func recordLayerSource(image imgutil.Image, layer layers.Layer) {
+	if layer.Source == nil {
+		return
+	}
+	rec, ok := image.(emit.LayerSourceRecorder)
+	if !ok {
+		return
+	}
+	rec.RecordLayerSource(layer.TarPath, emit.LayerSource{
+		Dir:     layer.Source.Dir,
+		File:    layer.Source.File,
+		Include: layer.Source.Include,
+		Dest:    layer.Source.Dest,
+		UID:     layer.Source.UID,
+		GID:     layer.Source.GID,
+		Mode:    layer.Source.Mode,
+	})
 }
 
 func (e *Exporter) makeBuildReport(layersDir string) (files.BuildReport, error) {

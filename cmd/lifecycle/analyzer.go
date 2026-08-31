@@ -49,6 +49,7 @@ func (a *analyzeCmd) DefineFlags() {
 		cli.FlagRunImage(&a.RunImageRef)
 		cli.FlagTags(&a.AdditionalTags)
 		cli.FlagUID(&a.UID)
+	cli.FlagSkipChown(&a.SkipChown)
 		cli.FlagUseDaemon(&a.UseDaemon)
 	}
 	// deprecated
@@ -88,8 +89,10 @@ func (a *analyzeCmd) Privileges() error {
 			return cmd.FailErr(err, "initialize docker client")
 		}
 	}
-	if err = priv.EnsureOwner(a.UID, a.GID, a.LayersDir, a.CacheDir, a.LaunchCacheDir); err != nil {
+	if !a.SkipChown {
+		if err = priv.EnsureOwner(a.UID, a.GID, a.LayersDir, a.CacheDir, a.LaunchCacheDir); err != nil {
 		return cmd.FailErr(err, "chown volumes")
+	}
 	}
 	if err = priv.RunAs(a.UID, a.GID); err != nil {
 		return cmd.FailErr(err, fmt.Sprintf("exec as user %d:%d", a.UID, a.GID))
@@ -107,6 +110,7 @@ func (a *analyzeCmd) Exec() error {
 		image.NewHandler(a.docker, a.keychain, a.LayoutDir, a.UseLayout, a.InsecureRegistries),
 		image.NewRegistryHandler(a.keychain, a.InsecureRegistries),
 	)
+
 	analyzer, err := factory.NewAnalyzer(a.Inputs(), cmd.DefaultLogger)
 	if err != nil {
 		return unwrapErrorFailWithCode(err, a.CodeFor(platform.AnalyzeError), "initialize analyzer")

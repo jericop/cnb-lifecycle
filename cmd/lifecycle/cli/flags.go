@@ -53,6 +53,10 @@ func FlagExtendedDir(extendedDir *string) {
 	flagSet.StringVar(extendedDir, "extended", *extendedDir, "path to output directory for image layers created from applying generated Dockerfiles")
 }
 
+func FlagEmitExportPlan(emitExportPlan *string) {
+	flagSet.StringVar(emitExportPlan, "emit-export-plan", *emitExportPlan, "EXPERIMENTAL: opt into BuildKit-native emit-mode; path to output directory for the emit contract (buildkit/plan.json + config.json) instead of assembling/pushing an image")
+}
+
 func FlagExtensionsDir(extensionsDir *string) {
 	flagSet.StringVar(extensionsDir, "extensions", *extensionsDir, "path to extensions directory")
 }
@@ -142,6 +146,10 @@ func FlagSkipLayers(skipLayers *bool) {
 	flagSet.BoolVar(skipLayers, "skip-layers", *skipLayers, "do not provide layer metadata to buildpacks")
 }
 
+func FlagSkipChown(skipChown *bool) {
+	flagSet.BoolVar(skipChown, "skip-chown", *skipChown, "skip chown of volumes (for unprivileged environments like buildkit)")
+}
+
 func FlagSkipRestore(skipRestore *bool) {
 	flagSet.BoolVar(skipRestore, "skip-restore", *skipRestore, "do not restore layers or layer metadata")
 }
@@ -185,4 +193,14 @@ func FlagInsecureRegistries(insecureRegistries *str.Slice) {
 // DeprecatedFlagRunImage sets the run image
 func DeprecatedFlagRunImage(deprecatedRunImage *string) {
 	flagSet.StringVar(deprecatedRunImage, "image", "", "[deprecated] reference to run image")
+}
+
+
+
+// FlagKeepPreparedMetadataLabel controls whether the apply-image-metadata step
+// leaves the io.buildpacks.lifecycle.prepared-metadata label on the finalized
+// image (durable, enabling later self-healing re-application) instead of removing
+// it.
+func FlagKeepPreparedMetadataLabel(keep *bool) {
+	flagSet.BoolVar(keep, "keep-prepared-metadata-label", *keep, "keep the prepared-metadata label on the finalized image (enables later self-healing re-apply)")
 }
