@@ -1,18 +1,17 @@
 name: publish-lifecycle
 
+# Manual only. This workflow file lives on the fork's default branch (fork-main) so it
+# is dispatchable, but it BUILDS whatever `ref` you pass (a branch or tag of
+# jericop/cnb-lifecycle) and derives the published image tag from that ref. This lets
+# you publish from a code branch (e.g. buildkit-native-export) that does NOT itself
+# carry this workflow file.
 on:
-  push:
-    branches:
-      - skip-chown
-      - buildkit-multi-arch-support
-      - buildkit-native-export
-    tags:
-      # Semver-style tags on the buildkit-native-export line publish a pinned,
-      # immutable lifecycle image (e.g. buildkit-native-export-v0.1.0 ->
-      # jericop/lifecycle:buildkit-native-export-v0.1.0) that pack + the builder
-      # can reference by a stable tag instead of a moving branch tag.
-      - 'buildkit-native-export-v*'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "cnb-lifecycle git ref to build + publish from (branch or tag). The image tag is derived from this."
+        required: false
+        default: "buildkit-native-export"
 
 permissions:
   contents: read
@@ -21,9 +20,15 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      REF: ${{ github.event.inputs.ref || 'buildkit-native-export' }}
     steps:
+      # Check out the CODE to build from the requested ref (not fork-main, which only
+      # carries this workflow). fetch-depth 0 so make/version tooling can see history.
       - uses: actions/checkout@v5
         with:
+          repository: jericop/cnb-lifecycle
+          ref: ${{ env.REF }}
           fetch-depth: 0
       - name: Setup go
         uses: actions/setup-go@v5
@@ -41,31 +46,29 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Publish images
         run: |
-          # Derive the image tag from the git ref.
+          # Derive the image tag from the requested ref ($REF).
           #
-          # Tag push (refs/tags/...): publish an immutable, pinned image whose
-          # tag matches the git tag verbatim, e.g.
+          # Semver-style tag ref (buildkit-native-export-v*): publish an immutable,
+          # pinned image whose tag matches the ref verbatim, e.g.
           #   buildkit-native-export-v0.1.0 -> jericop/lifecycle:buildkit-native-export-v0.1.0
           # pack's go.mod replace + the builder's [lifecycle].uri pin to this tag.
           #
-          # Branch push (refs/heads/...): publish a moving per-branch tag so each
-          # feature branch publishes its own tag and never clobbers another:
-          #   skip-chown                 -> jericop/lifecycle:skip-chown-poc
-          #   buildkit-multi-arch-support-> jericop/lifecycle:buildkit-multi-arch-support
-          #   buildkit-native-export     -> jericop/lifecycle:buildkit-native-export
-          case "${GITHUB_REF}" in
-            refs/tags/*)
-              LIFECYCLE_IMAGE_TAG="${GITHUB_REF#refs/tags/}"
-              echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (git tag)"
+          # Branch ref: publish a moving per-branch tag so each branch publishes its own
+          # tag and never clobbers another:
+          #   skip-chown             -> jericop/lifecycle:skip-chown-poc  (legacy alias)
+          #   buildkit-native-export -> jericop/lifecycle:buildkit-native-export
+          case "${REF}" in
+            buildkit-native-export-v*)
+              LIFECYCLE_IMAGE_TAG="${REF}"
+              echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (semver ref)"
+              ;;
+            skip-chown)
+              LIFECYCLE_IMAGE_TAG=skip-chown-poc
+              echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (branch ${REF})"
               ;;
             *)
-              BRANCH="${GITHUB_REF#refs/heads/}"
-              if [ "${BRANCH}" = "skip-chown" ]; then
-                LIFECYCLE_IMAGE_TAG=skip-chown-poc
-              else
-                LIFECYCLE_IMAGE_TAG="${BRANCH}"
-              fi
-              echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (branch ${BRANCH})"
+              LIFECYCLE_IMAGE_TAG="${REF}"
+              echo "Publishing lifecycle tag: ${LIFECYCLE_IMAGE_TAG} (ref ${REF})"
               ;;
           esac
 
